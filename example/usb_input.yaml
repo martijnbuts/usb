@@ -1,0 +1,53 @@
+# ─── USB mouse and keyboard for an ESP32-P4 LVGL screen ───────────────────────────────────────
+# Use as a package next to a device config that already has lvgl:
+#   packages:
+#     usb: !include usb_input.yaml
+#
+# Tested on the Waveshare ESP32-P4-WIFI6-Touch-LCD-7B: devices go in the Type-A port
+# (USB 2.0 OTG High-Speed). Mouse and keyboard at the same time: a combo receiver (one dongle)
+# or a small USB hub.
+#
+# usb_host, usb_hid and hid come from the p1ngb4ck fork (upstream ESPHome has no HID support
+# yet), pinned to a commit because testing_dev changes daily. lvgl_usb_hid (this repo) connects
+# them to upstream ESPHome's lvgl.
+#
+# Keyboard shortcuts for automations go in usb_hid with on_key, for example:
+#   on_key:
+#     - key: F1
+#       then: ...
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/p1ngb4ck/esphome
+      ref: caa97336f20007c905b2f3ce89bee87a8f4595f4
+    components: [usb_host, usb_hid, hid]
+  - source:
+      type: git
+      url: https://github.com/martijnbuts/usb
+    components: [lvgl_usb_hid]
+
+usb_host:
+  # A hub may sit in between (keyboard and mouse both in one port)
+  enable_hubs: true
+
+# Two HID devices at once: each usb_hid entry takes the next keyboard or mouse.
+usb_hid:
+  - id: usb_input_1
+    layout: us
+    device_name:
+      name: "USB device 1"
+      icon: mdi:usb
+      entity_category: diagnostic
+  - id: usb_input_2
+    layout: us
+    device_name:
+      name: "USB device 2"
+      icon: mdi:usb
+      entity_category: diagnostic
+
+lvgl_usb_hid:
+  - hid_id: usb_input_1
+    hide_after: 10s
+  - hid_id: usb_input_2
+    hide_after: 10s
