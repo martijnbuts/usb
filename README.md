@@ -52,16 +52,9 @@ tested with mice and keyboards.
 
 ## How it works
 
-```
- USB device ──► usb_host ──► usb_hid ──────────────► hid ─────────────────► lvgl_usb_hid ──► LVGL
-               (ESP-IDF     (one client per device;  (report parser:        (this repo)
-                USB host,    claims HID interfaces,   keys, text via the     pointer indev
-                hubs)        reads report descriptor, layout, pointer,       + cursor,
-                             interrupt-IN reports)    controls)              keypad indev
-                                                         │                   + focus group
-                                                         └──► on_key / on_text / on_pointer /
-                                                              on_control automations
-```
+![How it works: USB devices → usb_host → usb_hid → hid (fork) → lvgl_usb_hid (pointer and keypad) → LVGL, and all events to YAML automations](docs/architecture.drawio.svg)
+
+<sub>Source: [`docs/architecture.drawio`](docs/architecture.drawio) — open it in [draw.io](https://app.diagrams.net) to edit; the SVG embeds the diagram too.</sub>
 
 | Part | From | Does |
 |---|---|---|
