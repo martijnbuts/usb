@@ -8,8 +8,9 @@
 # or a small USB hub (then also full_speed_only, see below).
 #
 # usb_host, usb_hid and hid come from the p1ngb4ck fork (upstream ESPHome has no HID support
-# yet), pinned to a commit because testing_dev changes daily. lvgl_usb_hid (this repo) connects
-# them to upstream ESPHome's lvgl.
+# yet), pinned to a commit because testing_dev changes daily. 4e93938 (17 Oct 2026) is newer than
+# the hardware-tested caa97336f20007c905b2f3ce89bee87a8f4595f4: see the README.
+# lvgl_usb_hid (this repo) connects them to upstream ESPHome's lvgl.
 #
 # Keyboard shortcuts for automations go in usb_hid with on_key, for example:
 #   on_key:
@@ -20,7 +21,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/p1ngb4ck/esphome
-      ref: caa97336f20007c905b2f3ce89bee87a8f4595f4
+      ref: 4e93938ddddeccfe0c6d545e07628a75f4be7443
     components: [usb_host, usb_hid, hid]
   - source:
       type: git

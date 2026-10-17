@@ -4,7 +4,14 @@ A USB mouse and keyboard as input for an ESPHome LVGL screen on the ESP32-P4, on
 ESPHome-dev** with ESP-IDF 6.1.
 
 Tested on the **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B** (Type-A USB 2.0 OTG High-Speed port),
-ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6.
+ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit `caa9733` (13 Oct 2026).
+
+> **Fork commit:** the example now pins the fork at
+> [`4e93938`](https://github.com/p1ngb4ck/esphome/commit/4e93938ddddeccfe0c6d545e07628a75f4be7443)
+> (17 Oct 2026). It adds the gamepad layer, touch screens, MCE IR receivers, Logitech receiver
+> handling and fixes for low-speed devices behind a hub. `lvgl_usb_hid` uses only fork API that
+> did not change, but this commit has **not been compiled or tested on the hardware yet**; use
+> `caa97336f20007c905b2f3ce89bee87a8f4595f4` if you want the tested one.
 
 - [What you get](#what-you-get)
 - [Supported USB devices](#supported-usb-devices)
@@ -39,17 +46,18 @@ component turns it into screen input; "Automations" means `usb_hid` delivers it 
 |---|---|---|---|
 | USB mouse (wired or wireless dongle) | ✅ pointer + cursor | ✅ `on_pointer`, `on_key` | Left button, vertical and horizontal wheel go to LVGL. Right/middle/extra buttons only to automations (`MOUSE_RIGHT`, `MOUSE_MIDDLE`, `BUTTON_4`…). |
 | USB keyboard | ✅ keypad + focus | ✅ `on_key`, `on_text` | Any of ~90 keyboard layouts (XKB names: `us`, `nl`, `de`, `de(nodeadkeys)`, …). Num/Caps/Scroll Lock LEDs work. |
-| Combo receiver (keyboard + mouse on one dongle, e.g. a Logitech Unifying receiver) | ✅ both | ✅ | One USB device with several HID interfaces (up to 4): **one** `usb_hid` entry covers it. |
-| Keyboard with built-in touchpad | ✅ if the touchpad reports as a mouse | ✅ | Most do (relative motion). |
+| Combo receiver (keyboard + mouse on one dongle, e.g. a Logitech Unifying or Bolt receiver) | ✅ both | ✅ | One USB device with several HID interfaces (up to 4): **one** `usb_hid` entry covers it. Logitech's own HID++ messages are kept out of the controls. |
+| Keyboard with built-in touchpad, separate touchpad | ✅ | ✅ | As mouse motion, with a touch as left button. |
 | Media keys, multimedia keyboards, USB remote controls | ❌ | ✅ `on_key` (`VOLUME_UP`, `MEDIA_PLAY_PAUSE`, …) | Consumer page keys. |
-| Gamepads and joysticks | ❌ (not yet) | ✅ `on_key` (buttons) and `on_control` (sticks, triggers, D-pad) | See [Gamepads](#gamepads). |
-| USB touchscreens, drawing tablets (absolute coordinates) | ❌ | ⚠️ raw values via `on_control` | Only *relative* pointers (mice, touchpads) drive the cursor. |
+| Windows Media Center (MCE / eHome) IR receiver + remote | ⚠️ arrows and OK | ✅ `on_key` | Not HID; decoded as Linux `mceusb` does. The arrows and OK arrive as keyboard keys, so they move the LVGL focus and press; Back is `AC_BACK` (automations only). |
+| Gamepads, joysticks, steering wheels | ❌ (not yet) | ✅ `on_key` (buttons, D-pad), `on_control` (sticks, triggers), `sensor` | One layout for every pad. See [Gamepads](#gamepads). |
+| USB touchscreens, pens, drawing tablets | ⚠️ as a touchpad | ✅ | The first contact becomes relative motion with the left button held: dragging moves the cursor and presses, a touch does **not** tap where you touch. Motion is in the device's own units, so it can be fast. |
 | Barcode scanners in keyboard mode | ✅ as keyboard | ✅ `on_text` | They are keyboards; pick the layout the scanner is set to. |
 | Webcams | ❌ | ❌ | See [Webcams](#webcams). |
 | USB hub | – | – | Needs `enable_hubs: true`, and `full_speed_only: true` for keyboards and mice behind it: see [below](#usb-versions-speeds-and-hubs). |
 
-"✅" for gamepads, remotes and tablets means the code path exists in the fork; this repo is only
-tested with mice and keyboards.
+"✅" for gamepads, remotes, IR receivers and touch screens means the code path exists in the
+fork; this repo is only tested with mice and keyboards.
 
 ## USB versions, speeds and hubs
 
@@ -112,9 +120,11 @@ Good to know:
 
 - Low-speed devices behind a hub are a little slower to enumerate: the controller can send only
   one PRE-marked transaction per 1 ms frame. For keyboards and mice that makes no noticeable
-  difference.
+  difference. The fork commit pinned in the example (`4e93938`) enforces this per frame for
+  every control transfer and fixes several hub-port races; with older fork commits low-speed
+  devices behind a hub are less reliable.
 - `log_low_speed_hub_errors: true` (in `usb_host`) logs every transaction error of a low-speed
-  device behind a full-speed hub; useful when a device behind a hub does not show up.
+  device behind a full-speed hub (as `[E]`); useful when a device behind a hub does not show up.
 - Every device and endpoint takes host channels (16 on the ESP32-P4); a hub with many devices can
   run out, and the next device is then not enumerated.
 - The ESP32-P4 also has a second, full-speed-only controller (`controllers:` / `dual_host:` in the
@@ -127,7 +137,7 @@ Sources: [ESP-USB host guide (ESP32-P4)](https://docs.espressif.com/projects/esp
 (speeds, hubs, transaction translator, `fsls_only`, channels), the
 [`espressif/usb` changelog](https://github.com/espressif/esp-usb/blob/master/host/usb/CHANGELOG.md)
 and [`hub.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hub.c) (the TT check), and the fork's
-[`usb_host`](https://github.com/p1ngb4ck/esphome/tree/caa97336f20007c905b2f3ce89bee87a8f4595f4/esphome/components/usb_host)
+[`usb_host`](https://github.com/p1ngb4ck/esphome/tree/4e93938ddddeccfe0c6d545e07628a75f4be7443/esphome/components/usb_host)
 (`full_speed_only`, `log_low_speed_hub_errors`, the low-speed-behind-hub patch).
 
 ## How it works
@@ -139,8 +149,8 @@ and [`hub.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hub.
 | Part | From | Does |
 |---|---|---|
 | `usb_host` | [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) (`testing_dev`) | Espressif's USB host library (`espressif/usb` 1.4.1, patched), hub support, routes each plugged-in device to a client |
-| `usb_hid` | same fork | one client per USB device: finds its HID interfaces, fetches each report descriptor, reads the interrupt-IN reports. Also decodes Xbox 360 pads (not HID) |
-| `hid` | same fork | parses reports into keys and buttons, typed text (keyboard layout, Shift, AltGr, dead keys), mouse motion and other controls |
+| `usb_hid` | same fork | one client per USB device: finds its HID interfaces, fetches each report descriptor, reads the interrupt-IN reports. Also drives devices that are not plain HID: Xbox 360 and Xbox One/Series pads, MCE IR receivers, PlayStation/Switch/Steam pads that need an init |
+| `hid` | same fork | parses reports into keys and buttons, typed text (keyboard layout, Shift, AltGr, dead keys), mouse and touch motion, a common gamepad layout and other controls |
 | `lvgl_usb_hid` | this repo | turns that into LVGL input devices: a pointer with a cursor and a keypad with a focus group |
 
 ### From USB report to event
@@ -148,8 +158,9 @@ and [`hub.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hub.
 1. When a device is plugged in, `usb_host` enumerates it and hands it to the first free
    `usb_hid` entry that matches (any HID device, or the one with the configured `vid`/`pid`).
 2. `usb_hid` claims each HID interface and fetches its **report descriptor**, which says where
-   in a report each key, button and axis sits. Nothing is hard-coded per brand: any device that
-   follows the HID standard is understood.
+   in a report each key, button and axis sits. Any device that follows the HID standard is
+   understood without a driver of its own; only pads and receivers that need an init or speak
+   their own protocol have one (see [Gamepads](#gamepads)).
 3. Reports arrive on the USB task and are passed through a lock-free queue to the ESPHome main
    loop, so everything after this point (automations, LVGL) runs on the main loop.
 4. `hid` sorts every value in a report:
@@ -157,8 +168,11 @@ and [`hub.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hub.
      keys also the **typed text** after the layout is applied;
    - **mouse**: relative X/Y, wheel, horizontal wheel and buttons 1–8 → one pointer event
      `(dx, dy, wheel, pan, buttons)` per report; the buttons are key events too;
-   - **everything else** (stick axes, triggers, hat switch, sliders) → control events
-     `(page, usage, value)`.
+   - **touch screens, pens, touchpads**: the first contact's change in position → the same
+     pointer event, with button 1 held while it touches;
+   - **gamepads**: buttons and D-pad → key events in one common layout, sticks and triggers →
+     control events, normalized;
+   - **everything else** (sliders, dials, wheels) → control events `(page, usage, value)`.
 5. `lvgl_usb_hid` listens to the pointer, key and text events of its `usb_hid` entry.
 
 ### Mouse → LVGL pointer
@@ -229,7 +243,8 @@ packages:
   usb: !include usb_input.yaml
 ```
 
-The example pins the fork to a commit, because its `testing_dev` branch changes daily. Upstream
+The example pins the fork to a commit (`4e93938`, see the note at the top), because its
+`testing_dev` branch changes daily. Upstream
 ESPHome-dev (checked 2026-10-16) has `usb_host`, `usb_uart` and `usb_cdc_acm`, but no
 `usb_hid` yet.
 
@@ -288,31 +303,42 @@ Keys are named as on Linux without `KEY_` (`ENTER`, `F1`, `A`, `LEFT`), consumer
 `lvgl_usb_hid` only maps keyboard keys and mouse motion to LVGL, so a gamepad does not move the
 focus or a cursor on its own.
 
-Which gamepads:
+Since fork commit `4e93938` every pad is reported in **one common layout**, whatever its brand
+or protocol, so an automation written for one pad works with another.
+
+Which gamepads (over USB):
 
 | Gamepad | Works | How |
 |---|---|---|
-| Standard HID gamepads and joysticks (most generic USB pads, many 8BitDo modes, arcade sticks) | ✅ | Read through the report descriptor like any HID device |
-| Xbox 360 wired (045E:028E) | ✅ | Not HID; decoded as Linux `xpad` does |
-| Xbox 360 wireless receiver for PC (045E:0719) | ✅ | Same, first pad |
-| 8BitDo in X-input mode (2DC8:310B) | ✅ | Same |
-| Xbox One / Series controllers | ❌ | Use the GIP protocol, which is not implemented |
-| PlayStation DualShock 4 / DualSense over USB | ⚠️ likely | They are HID gamepads, but untested here |
+| Standard HID gamepads and joysticks (generic USB pads, 8BitDo in D-input mode, arcade sticks) | ✅ | Read through the report descriptor, mapped the DirectInput way |
+| Xbox 360 wired, and pads in X-input mode (8BitDo, many third-party pads) | ✅ | Not HID; decoded as Linux `xpad` does, matched by interface class |
+| Xbox 360 wireless receiver for PC (045E:0719) | ✅ | Same, the first pad only |
+| Xbox One / Series pads, wired | ✅ | GIP protocol, matched by interface class (every vendor) |
+| PlayStation DualShock 3 | ✅ | Needs a USB init, which the driver sends |
+| PlayStation DualShock 4, DualSense, DualSense Edge | ✅ | Own driver (Linux `hid-sony` / `hid-playstation`) |
+| Nintendo Switch Pro Controller | ✅ | USB handshake, stick calibration, full report mode |
+| Steam Controller, Google Stadia | ✅ | Own drivers (lizard mode off on the Steam Controller) |
+| Nintendo-layout HID pads (e.g. PowerA) | ✅ | Buttons swapped to the common positions |
+| Thrustmaster T150 / T300 / T500 wheels | ✅ | Switched from the generic "FFB wheel" mode to their own |
+
+All but the plain HID pads are new in the pinned fork commit and untested here.
 
 What a gamepad delivers:
 
-- **Buttons** → `on_key` as `BUTTON_1`, `BUTTON_2`, … (numbering depends on the pad; turn the
-  logger to DEBUG and press each button to see its name). On an Xbox 360 pad: A=`BUTTON_1`,
-  B=`BUTTON_2`, X=`BUTTON_3`, Y=`BUTTON_4`, LB=`BUTTON_5`, RB=`BUTTON_6`, Back=`BUTTON_7`,
-  Start=`BUTTON_8`, stick clicks `BUTTON_9`/`BUTTON_10`, Guide=`BUTTON_11`.
-- **Sticks and triggers** → `on_control` as `AXIS_X`/`AXIS_Y` (left stick), `AXIS_RX`/`AXIS_RY`
-  (right stick), `AXIS_Z`/`AXIS_RZ` (triggers), with the raw value.
-- **D-pad** → on most HID pads `on_control` as `HAT_SWITCH` (0 = up, clockwise to 7, other
-  values = released); on an Xbox 360 pad four keys `0x01:0x90` (up), `0x01:0x91` (down),
-  `0x01:0x92` (right), `0x01:0x93` (left).
+| Control | Event | Names and values |
+|---|---|---|
+| Face buttons, by **position** | `on_key` | `BUTTON_1` south (A / Cross / B on Nintendo), `BUTTON_2` east, `BUTTON_3` west, `BUTTON_4` north |
+| Shoulders, menu buttons | `on_key` | `BUTTON_5` L1/LB, `BUTTON_6` R1/RB, `BUTTON_7` Select/Back/View/Share, `BUTTON_8` Start/Menu/Options, `BUTTON_9` / `BUTTON_10` stick clicks, `BUTTON_11` Home/Guide/PS |
+| Extra buttons | `on_key` | `BUTTON_12` / `BUTTON_13` digital L2/R2, `BUTTON_14` Capture/Share, `BUTTON_15` touchpad click, `BUTTON_16` mute, `BUTTON_17`–`BUTTON_20` back paddles |
+| D-pad (also hat switches) | `on_key` | `0x01:0x90` up, `0x01:0x91` down, `0x01:0x92` right, `0x01:0x93` left |
+| Sticks | `on_control` | `AXIS_X` / `AXIS_Y` left, `AXIS_RX` / `AXIS_RY` right; −32768…32767, Y positive downwards |
+| Triggers | `on_control` | `AXIS_Z` left, `AXIS_RZ` right; 0…65535 |
 
-Example: an Xbox 360 pad flips through the LVGL pages with the D-pad and goes to the main page
-with A (`on_key` fires on press and on release, hence the `pressed` check):
+`on_key` fires on press and on release, with `key` and `pressed` as variables; `on_control` gives
+`control` (the name) and `value`.
+
+Example: a pad flips through the LVGL pages with the D-pad, goes to the main page with the south
+button, and shows the left stick as a sensor in Home Assistant:
 
 ```yaml
 usb_hid:
@@ -332,23 +358,37 @@ usb_hid:
                 lambda: return pressed;
               then:
                 - lvgl.page.previous:
-      - key: BUTTON_1        # A
+      - key: BUTTON_1        # south: A / Cross
         then:
           - if:
               condition:
                 lambda: return pressed;
               then:
                 - lvgl.page.show: main_page
-    on_control:              # log sticks, triggers and hat switch to find their names
-      - then:
-          - logger.log:
-              format: "%s = %d"
-              args: [control.c_str(), value]
+                - hid.rumble:
+                    id: usb_gamepad
+                    strong: 40%
+                    weak: 40%
+                    duration: 150ms
+
+sensor:
+  - platform: hid
+    hid_id: usb_gamepad
+    control: AXIS_X          # shown as -100..100 (triggers 0..100)
+    name: "Gamepad left stick X"
 ```
 
-Built-in gamepad navigation in `lvgl_usb_hid` (D-pad moves the focus, A presses, B is back, left
-stick moves the cursor) would be a small addition on top of the existing key and control
-events; it is not there yet.
+Outputs, on pads that have them:
+
+- `hid.rumble` (`strong`, `weak` as percentages, `duration`; 0 ms keeps it on until the next one)
+- `hid.set_player_led` (`player` 0–5, 0 is off)
+- `hid.set_light_bar` (`red`, `green`, `blue` as percentages; DualShock 4 and DualSense)
+- `api_actions: true` on the `usb_hid` entry also offers these as Home Assistant actions
+  (`<id>_rumble`, `<id>_set_player_led`, `<id>_set_light_bar`).
+
+Built-in gamepad navigation in `lvgl_usb_hid` (D-pad moves the focus, south presses, east is back,
+left stick moves the cursor) would be a small addition on top of these events; it is not there
+yet.
 
 ## Webcams
 
@@ -378,7 +418,8 @@ tested here**; listed so you know what exists:
 
 - **Nothing happens:** check the log. With the logger at `DEBUG`, `usb_hid` logs every key and
   button as `[usb_input_1] ENTER pressed`. `No usable HID interface on this device` means the
-  device is not HID (or not an Xbox 360 pad); `VID:PID: no driver` means no entry claimed it.
+  device is neither HID nor one of the pads and receivers with a driver of their own;
+  `VID:PID: no driver` means no entry claimed it.
 - **Mouse works, keyboard focus is invisible:** your LVGL theme or styles must draw a focus state
   (`LV_STATE_FOCUS_KEY`, e.g. an outline under `focused:` / `focus_key:` styles).
 - **A widget cannot be reached with Tab:** it needs an action (`on_click`, `on_value`, …) and must
@@ -397,7 +438,9 @@ tested here**; listed so you know what exists:
   but are not typed into the text area.
 - Only the left mouse button is used by LVGL.
 - One cursor per `lvgl_usb_hid` entry; two mice give two cursors.
-- Absolute pointers (USB touchscreens, tablets) and gamepads do not drive LVGL.
+- Gamepads do not drive LVGL yet. USB touch screens and tablets move the cursor like a touchpad
+  (relative), they do not tap where they are touched.
+- The MCE remote's Back key is a consumer key (`AC_BACK`): it reaches automations, not LVGL.
 - ESP32-P4 only in this repo (the fork's `usb_hid` also builds for the S2 and S3, untested here).
 
 ## Credits
