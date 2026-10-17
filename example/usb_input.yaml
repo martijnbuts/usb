@@ -31,7 +31,8 @@ usb_host:
   # A hub may sit in between (keyboard and mouse both in one port)
   enable_hubs: true
   # Keyboards and mice are low/full-speed devices. Behind a USB 2.0 hub they need split
-  # transactions, which ESP-IDF does not have: run the port at full speed when you use a hub.
+  # transactions, which espressif/usb (the USB host library ESP-IDF 6.1 uses) does not have:
+  # run the port at full speed when you use a hub.
   # Not needed for a combo receiver or a device directly in the port.
   # full_speed_only: true
 

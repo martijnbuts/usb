@@ -72,30 +72,37 @@ Plugged in **directly**, a device of any of the three speeds works.
 
 A USB 2.0 hub on a high-speed port runs at high speed itself. To pass low- and full-speed
 traffic on, the hub's *transaction translator* turns it into *split transactions*, and the host
-has to support those. ESP-IDF's USB host does not: Espressif's USB host guide lists the missing
-transaction translator layer as a known limitation, with no full- or low-speed devices behind a
-hub on a high-speed host.
+has to support those.
+
+With ESP-IDF 6.1 the USB host library is not part of ESP-IDF itself but the `espressif/usb`
+component; the fork uses version **1.4.1** of it, with its own patches. That library has no
+split transactions: a low- or full-speed device behind a high-speed hub is refused with
+`Connected device is LS, transaction translator (TT) is not supported` in the log. This is
+still the case in the newest release (1.6.0, October 2026), where Espressif lists it as a known
+limitation.
 
 So **a keyboard or mouse behind a USB 2.0 hub is not found by default**, while a high-speed
 device (a USB stick) behind the same hub is.
 
-The fix is `full_speed_only: true` in `usb_host` (from the fork, using ESP-IDF's `fsls_only`).
+The fix is `full_speed_only: true` in `usb_host` (from the fork). `espressif/usb` only gained
+this as `fsls_only` in 1.6.0, and ESP-IDF 6.1's HAL lacks the setter that version expects, so
+the fork backports it into its patched 1.4.1.
 The high-speed controller then skips the high-speed handshake, so the hub and everything behind
 it run at full or low speed: the hub passes full-speed traffic straight on, and low-speed devices
-behind it get the *PRE* packet they need. The fork patches ESP-IDF so that a low-speed device
-behind a full-speed hub can be enumerated at all.
+behind it get the *PRE* packet they need. The fork also patches `espressif/usb` so that a
+low-speed device behind a full-speed hub can be enumerated at all.
 
 ```yaml
 usb_host:
   enable_hubs: true
-  full_speed_only: true   # keyboards and mice behind a hub (no split transactions in ESP-IDF)
+  full_speed_only: true   # keyboards and mice behind a hub (no split transactions in espressif/usb)
 ```
 
 | Setup | Works | Notes |
 |---|---|---|
 | keyboard, mouse or gamepad directly in the port | ✅ | any speed |
 | combo receiver directly in the port | ✅ | the simplest way to get keyboard + mouse; no hub needed |
-| USB 2.0 hub, keyboard/mouse behind it, default settings | ❌ | no split transactions in ESP-IDF |
+| USB 2.0 hub, keyboard/mouse behind it, default settings | ❌ | no split transactions; log says `transaction translator (TT) is not supported` |
 | USB 2.0 hub, keyboard/mouse behind it, `full_speed_only: true` | ✅ | the hub runs as a full-speed hub |
 | USB 1.1 hub (full speed), keyboard/mouse behind it | ✅ | it is a full-speed hub anyway; `full_speed_only` makes no difference |
 | USB 2.0 hub, only high-speed devices behind it | ✅ | without `full_speed_only` |
@@ -113,11 +120,13 @@ Good to know:
 - The ESP32-P4 also has a second, full-speed-only controller (`controllers:` / `dual_host:` in the
   fork). It only helps if the board brings it out to a connector; the Type-A port of the
   Waveshare 7B is the high-speed one.
-- The hub rows above follow ESP-IDF's documented limits and the fork's code; they have not been
-  tested with this repo yet.
+- The hub rows above follow the `espressif/usb` source and docs and the fork's code; they have
+  not been tested with this repo yet.
 
 Sources: [ESP-USB host guide (ESP32-P4)](https://docs.espressif.com/projects/esp-usb/en/latest/esp32p4/usb_host.html)
-(speeds, hubs, transaction translator, `fsls_only`, channels) and the fork's
+(speeds, hubs, transaction translator, `fsls_only`, channels), the
+[`espressif/usb` changelog](https://github.com/espressif/esp-usb/blob/master/host/usb/CHANGELOG.md)
+and [`hub.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hub.c) (the TT check), and the fork's
 [`usb_host`](https://github.com/p1ngb4ck/esphome/tree/caa97336f20007c905b2f3ce89bee87a8f4595f4/esphome/components/usb_host)
 (`full_speed_only`, `log_low_speed_hub_errors`, the low-speed-behind-hub patch).
 
@@ -129,7 +138,7 @@ Sources: [ESP-USB host guide (ESP32-P4)](https://docs.espressif.com/projects/esp
 
 | Part | From | Does |
 |---|---|---|
-| `usb_host` | [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) (`testing_dev`) | ESP-IDF USB host library, hub support, routes each plugged-in device to a client |
+| `usb_host` | [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) (`testing_dev`) | Espressif's USB host library (`espressif/usb` 1.4.1, patched), hub support, routes each plugged-in device to a client |
 | `usb_hid` | same fork | one client per USB device: finds its HID interfaces, fetches each report descriptor, reads the interrupt-IN reports. Also decodes Xbox 360 pads (not HID) |
 | `hid` | same fork | parses reports into keys and buttons, typed text (keyboard layout, Shift, AltGr, dead keys), mouse motion and other controls |
 | `lvgl_usb_hid` | this repo | turns that into LVGL input devices: a pointer with a cursor and a keypad with a focus group |
