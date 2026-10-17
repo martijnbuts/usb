@@ -5,7 +5,7 @@
 #
 # Tested on the Waveshare ESP32-P4-WIFI6-Touch-LCD-7B: devices go in the Type-A port
 # (USB 2.0 OTG High-Speed). Mouse and keyboard at the same time: a combo receiver (one dongle)
-# or a small USB hub.
+# or a small USB hub (then also full_speed_only, see below).
 #
 # usb_host, usb_hid and hid come from the p1ngb4ck fork (upstream ESPHome has no HID support
 # yet), pinned to a commit because testing_dev changes daily. lvgl_usb_hid (this repo) connects
@@ -30,6 +30,10 @@ external_components:
 usb_host:
   # A hub may sit in between (keyboard and mouse both in one port)
   enable_hubs: true
+  # Keyboards and mice are low/full-speed devices. Behind a USB 2.0 hub they need split
+  # transactions, which ESP-IDF does not have: run the port at full speed when you use a hub.
+  # Not needed for a combo receiver or a device directly in the port.
+  # full_speed_only: true
 
 # Two HID devices at once: each usb_hid entry takes the next keyboard or mouse.
 usb_hid:

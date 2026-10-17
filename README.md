@@ -8,6 +8,7 @@ ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6.
 
 - [What you get](#what-you-get)
 - [Supported USB devices](#supported-usb-devices)
+- [USB versions, speeds and hubs](#usb-versions-speeds-and-hubs)
 - [How it works](#how-it-works)
 - [Usage](#usage)
 - [Gamepads](#gamepads)
@@ -24,7 +25,7 @@ ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6.
   action, Enter presses, Esc is back, and typed text (printable ASCII) goes into a focused text
   area. Arrows go to the widget itself while it is in edit mode (a slider after Enter).
 - Mouse and keyboard activity counts as a touch for LVGL inactivity (screen savers, night mode).
-- Several devices at once (a combo receiver, or a hub with `enable_hubs: true`).
+- Several devices at once: a combo receiver, or a hub (see [USB versions, speeds and hubs](#usb-versions-speeds-and-hubs)).
 - Every key, button and control is also available to ESPHome automations through `usb_hid`
   (`on_key`, `on_text`, `on_pointer`, `on_control`), including devices LVGL does not use, such
   as media keys, remotes and gamepads.
@@ -45,10 +46,80 @@ component turns it into screen input; "Automations" means `usb_hid` delivers it 
 | USB touchscreens, drawing tablets (absolute coordinates) | ❌ | ⚠️ raw values via `on_control` | Only *relative* pointers (mice, touchpads) drive the cursor. |
 | Barcode scanners in keyboard mode | ✅ as keyboard | ✅ `on_text` | They are keyboards; pick the layout the scanner is set to. |
 | Webcams | ❌ | ❌ | See [Webcams](#webcams). |
-| USB hub | – | – | Needs `usb_host: enable_hubs: true` (on in the example). |
+| USB hub | – | – | Needs `enable_hubs: true`, and `full_speed_only: true` for keyboards and mice behind it: see [below](#usb-versions-speeds-and-hubs). |
 
 "✅" for gamepads, remotes and tablets means the code path exists in the fork; this repo is only
 tested with mice and keyboards.
+
+## USB versions, speeds and hubs
+
+USB devices talk at one of three speeds. The version on the box says which standard a device
+follows, not how fast it is: a "USB 2.0" keyboard is still a low-speed device.
+
+| Speed | Since | Typical devices |
+|---|---|---|
+| Low speed, 1.5 Mbit/s | USB 1.0 / 1.1 | most wired mice and keyboards, simple remotes |
+| Full speed, 12 Mbit/s | USB 1.1 | wireless receivers (Logitech Unifying and the like), gaming mice, gamepads, USB 1.1 hubs |
+| High speed, 480 Mbit/s | USB 2.0 | USB 2.0 hubs, webcams, USB sticks, card readers, sound cards |
+| SuperSpeed (5 Gbit/s and up) | USB 3.x | not in this port: USB 3 devices fall back to USB 2.0 speeds |
+
+Keyboards, mice and gamepads are always low or full speed; HID never needs more.
+
+The Type-A port of the Waveshare board is the ESP32-P4's **high-speed USB 2.0 controller**.
+Plugged in **directly**, a device of any of the three speeds works.
+
+### Hubs: where mixing speeds goes wrong
+
+A USB 2.0 hub on a high-speed port runs at high speed itself. To pass low- and full-speed
+traffic on, the hub's *transaction translator* turns it into *split transactions*, and the host
+has to support those. ESP-IDF's USB host does not: Espressif's USB host guide lists the missing
+transaction translator layer as a known limitation, with no full- or low-speed devices behind a
+hub on a high-speed host.
+
+So **a keyboard or mouse behind a USB 2.0 hub is not found by default**, while a high-speed
+device (a USB stick) behind the same hub is.
+
+The fix is `full_speed_only: true` in `usb_host` (from the fork, using ESP-IDF's `fsls_only`).
+The high-speed controller then skips the high-speed handshake, so the hub and everything behind
+it run at full or low speed: the hub passes full-speed traffic straight on, and low-speed devices
+behind it get the *PRE* packet they need. The fork patches ESP-IDF so that a low-speed device
+behind a full-speed hub can be enumerated at all.
+
+```yaml
+usb_host:
+  enable_hubs: true
+  full_speed_only: true   # keyboards and mice behind a hub (no split transactions in ESP-IDF)
+```
+
+| Setup | Works | Notes |
+|---|---|---|
+| keyboard, mouse or gamepad directly in the port | ✅ | any speed |
+| combo receiver directly in the port | ✅ | the simplest way to get keyboard + mouse; no hub needed |
+| USB 2.0 hub, keyboard/mouse behind it, default settings | ❌ | no split transactions in ESP-IDF |
+| USB 2.0 hub, keyboard/mouse behind it, `full_speed_only: true` | ✅ | the hub runs as a full-speed hub |
+| USB 1.1 hub (full speed), keyboard/mouse behind it | ✅ | it is a full-speed hub anyway; `full_speed_only` makes no difference |
+| USB 2.0 hub, only high-speed devices behind it | ✅ | without `full_speed_only` |
+| keyboard/mouse **and** a high-speed device (stick, webcam) on one hub | ⚠️ | only with `full_speed_only: true`; the high-speed device then runs at 12 Mbit/s |
+
+Good to know:
+
+- Low-speed devices behind a hub are a little slower to enumerate: the controller can send only
+  one PRE-marked transaction per 1 ms frame. For keyboards and mice that makes no noticeable
+  difference.
+- `log_low_speed_hub_errors: true` (in `usb_host`) logs every transaction error of a low-speed
+  device behind a full-speed hub; useful when a device behind a hub does not show up.
+- Every device and endpoint takes host channels (16 on the ESP32-P4); a hub with many devices can
+  run out, and the next device is then not enumerated.
+- The ESP32-P4 also has a second, full-speed-only controller (`controllers:` / `dual_host:` in the
+  fork). It only helps if the board brings it out to a connector; the Type-A port of the
+  Waveshare 7B is the high-speed one.
+- The hub rows above follow ESP-IDF's documented limits and the fork's code; they have not been
+  tested with this repo yet.
+
+Sources: [ESP-USB host guide (ESP32-P4)](https://docs.espressif.com/projects/esp-usb/en/latest/esp32p4/usb_host.html)
+(speeds, hubs, transaction translator, `fsls_only`, channels) and the fork's
+[`usb_host`](https://github.com/p1ngb4ck/esphome/tree/caa97336f20007c905b2f3ce89bee87a8f4595f4/esphome/components/usb_host)
+(`full_speed_only`, `log_low_speed_hub_errors`, the low-speed-behind-hub patch).
 
 ## How it works
 
@@ -304,8 +375,10 @@ tested here**; listed so you know what exists:
 - **A widget cannot be reached with Tab:** it needs an action (`on_click`, `on_value`, …) and must
   be clickable.
 - **Wrong characters typed:** set `layout:` on the `usb_hid` entry to your keyboard's layout.
-- **Device behind a hub not found:** `enable_hubs: true` must be set; try the device directly in
-  the port to rule out the hub, and use a powered hub for several devices.
+- **Device behind a hub not found:** set `enable_hubs: true`, and for keyboards, mice and
+  gamepads also `full_speed_only: true` (see [USB versions, speeds and hubs](#usb-versions-speeds-and-hubs)).
+  Try the device directly in the port to rule out the hub, and use a powered hub for several
+  devices.
 - **Two devices end up in the "wrong" entry:** pin each `usb_hid` entry to a device with
   `vid`/`pid`; `usb_host` logs them as `046D:C52B …` when a device connects.
 
