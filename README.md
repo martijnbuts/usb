@@ -141,18 +141,24 @@ Good to know:
 
 ### The two USB controllers of the ESP32-P4
 
-The chip has two USB host controllers. The fork can run either or both:
+The chip has two USB host controllers. The fork can run either or both. On the Waveshare 7B the
+[schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B/ESP32-P4-WIFI6-Touch-LCD-7B.pdf)
+shows three USB connectors:
 
-| Controller | Speeds | On the Waveshare 7B | Fork option |
+| Connector (wiki item) | Wired to | Controller | 5 V |
 |---|---|---|---|
-| High-speed (UTMI PHY) | high, full, low | the **Type-A** port (item 14 in the wiki) | default |
-| Full-speed (internal FSLS PHY) | full, low | probably the **Type-C "USB 1.1 FS"** port (item 15), see below | `controllers: full_speed` or `dual_host: true` |
+| **Type-A** "USB OTG 2.0 High Speed" (14) | the P4's dedicated USB 2.0 pins (pin 49 DM, pin 50 DP) | high-speed (UTMI PHY): high, full, low speed; the fork's default | **supplied** to the device through a DIO7003HE power switch (2 A version, current limit 2.1–3.5 A) from the board's 5 V |
+| **Type-C** "USB1.1 FS Direct Out" (15) | GPIO24 (D−, pin 52) and GPIO25 (D+, pin 53), no chip in between | USB-Serial-JTAG out of reset; the full-speed host controller with `fs_pins: "24_25"` | a power **input** (with a MOSFET power path), not a switched output |
+| **Type-C** "USB TO UART" (16) | CH343P USB-to-serial bridge on the ESP's UART | none (the P4 never sees USB here) | power input |
 
-The full-speed controller shares its two pin pairs with USB-Serial-JTAG: out of reset it uses
-GPIO26/27 and USB-Serial-JTAG GPIO24/25. The Waveshare wiki calls the second Type-C port "USB 1.1
-FS direct output" without naming pins; the only full-speed pins on the chip that can reach a
-connector directly are these two pairs, and GPIO26/27 are the board's RS485 lines, so that port is
-most likely GPIO24/25. To use it as a second host:
+So "for power supply, program flashing, and debugging" on the wiki means: the first Type-C port is
+the P4's own USB-Serial-JTAG (logs and flashing straight from the chip), the second one goes
+through the CH343P. Only the Type-A port gives power to a device.
+
+The full-speed controller shares two pin pairs with USB-Serial-JTAG: out of reset it uses
+GPIO26/27 and USB-Serial-JTAG GPIO24/25. On this board GPIO26/27 go through 0 Ω resistors (R63,
+R60) to the RS485 transceiver, and GPIO24/25 are the "USB1.1" Type-C. To use that Type-C as a
+second USB host:
 
 ```yaml
 usb_host:
@@ -160,12 +166,16 @@ usb_host:
   fs_pins: "24_25"     # quoted: unquoted YAML reads 24_25 as the number 2425
 ```
 
-That moves USB-Serial-JTAG to GPIO26/27 (the RS485 pins), so logging over that Type-C port is
-gone and RS485 cannot be used at the same time. The wiki describes that Type-C port for power and
-flashing, so it probably does not supply 5 V to a device; a powered hub in between solves that.
-With dual host, keyboard and mouse could sit on the full-speed port (directly or behind any hub)
-while the Type-A port keeps high speed for a USB stick or webcam. **Untested**; the pin pair is
-inferred, not confirmed by a schematic.
+What that costs and needs:
+
+- USB-Serial-JTAG moves to GPIO26/27, the RS485 lines: logging and flashing over that Type-C
+  port stop, and RS485 cannot be used at the same time (logging over the CH343P Type-C, `UART0`,
+  keeps working).
+- That Type-C port gives no 5 V to a device: use a powered hub, or a cable/adapter that injects
+  5 V. A USB-C-to-A OTG adapter alone leaves the device without power.
+- Keyboard and mouse can then sit on the full-speed port (directly or behind any hub, without
+  `full_speed_only`), while the Type-A port keeps high speed for a USB stick or webcam.
+- **Untested** on the hardware; the wiring above is read from the schematic.
 
 ### Other `usb_host` options in the fork
 
@@ -190,9 +200,12 @@ Sources: [ESP-USB host guide (ESP32-P4)](https://docs.espressif.com/projects/esp
 [`hcd_dwc.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hcd_dwc.c) (the 1 ms
 low-speed delay), the fork's
 [`usb_host`](https://github.com/p1ngb4ck/esphome/tree/80faf2e5523b007878248d108959afaf5f48a5de/esphome/components/usb_host)
-(options, `fsls_only` backport, FS pin selection) and the
+(options, `fsls_only` backport, FS pin selection), the
 [Waveshare ESP32-P4-WIFI6-Touch-LCD-7B wiki](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B)
-(ports, RS485 on GPIO26/27).
+(ports) and [schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B/ESP32-P4-WIFI6-Touch-LCD-7B.pdf)
+(USB wiring, power switches, RS485 on GPIO26/27), and the
+[DIO7003 datasheet](https://wmsc.lcsc.com/wmsc/upload/file/pdf/v2/lcsc/2111261830_DIOO-DIO7003LBST5_C2920627.pdf)
+(current limits per variant).
 
 ## How it works
 
@@ -600,4 +613,4 @@ is the supported route today.
 
 - `usb_host`, `usb_hid`, `hid` and the cursor approach: [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome).
   The HID report parser there comes from [fsievers22/esphome-ble-remote](https://github.com/fsievers22/esphome-ble-remote).
-- USB port: Waveshare [ESP32-P4-WIFI6-Touch-LCD-7B wiki](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B).
+- USB ports: Waveshare [ESP32-P4-WIFI6-Touch-LCD-7B wiki](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B) and [schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B/ESP32-P4-WIFI6-Touch-LCD-7B.pdf).
