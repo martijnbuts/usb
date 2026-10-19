@@ -401,8 +401,8 @@ All but the plain HID pads are new in the pinned fork commit. Tested here (19 Oc
 string `Controller`, and the fork picks its `Xbox 360` driver (log: `[hid.gamepad] [usb_input_1]
 Xbox 360`). Buttons, D-pad, sticks and triggers arrive in the common layout below; see
 [Troubleshooting](#a-device-stops-after-one-read-error-interface-0-stopped-status-1) for the one
-problem it showed. Many third-party pads use the same `045E:028E`, so the ID does not tell an
-original from a copy.
+problem it showed (power). The pad reports its firmware (`1.10` here) and rumble works.
+Many third-party pads use the same `045E:028E`, so the ID does not tell an original from a copy.
 
 What a gamepad delivers:
 
@@ -641,11 +641,11 @@ under a second, each with status 1, endpoint halted, flushed and cleared in betw
 unplugging and plugging in the pad brought it back. So the pad itself stopped answering
 properly; it did not disconnect.
 
-**Likely cause: power.** In this test the board was powered from a laptop's USB port
-(500–900 mA), and an Xbox 360 pad draws up to 500 mA by itself, more while it rumbles. A dip of
-the 5 V on the Type-A port gives exactly this kind of transaction error. Power the board from a
-charger or power bank of at least 5 V / 2 A when a pad is plugged in, and avoid rumble on weak
-supplies.
+**Cause: power.** In this test the board was powered from a laptop's USB port (500–900 mA),
+and an Xbox 360 pad draws up to 500 mA by itself, more while it rumbles. A dip of the 5 V on the
+Type-A port gives exactly this kind of transaction error. With the board on the laptop's charger
+instead, the same pad ran without a single error, rumble included (confirmed 19 Oct 2026). Power
+the board from a charger or power bank of at least 5 V / 2 A when a pad is plugged in.
 
 This repo has a copy of the fork's `usb_hid` (from `c550f96`) with these changes
 ([`docs/patches/usb_hid-read-retry.patch`](docs/patches/usb_hid-read-retry.patch)):
