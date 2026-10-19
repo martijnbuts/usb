@@ -25,7 +25,7 @@ ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit `caa9733
 - [Gamepads](#gamepads)
 - [USB audio: ESPHome's or the fork's](#usb-audio-esphomes-or-the-forks)
 - [Webcams](#webcams)
-- [Other USB devices in the fork](#other-usb-devices-in-the-fork)
+- [Other USB devices in the fork](#other-usb-devices-in-the-fork) (and [USB Ethernet](#usb-ethernet-not-supported))
 - [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
 
@@ -60,6 +60,7 @@ component turns it into screen input; "Automations" means `usb_hid` delivers it 
 | Barcode scanners in keyboard mode | ✅ as keyboard | ✅ `on_text` | They are keyboards; pick the layout the scanner is set to. |
 | USB sound cards, headsets, USB microphones | – | ✅ `microphone`, `speaker` | Through the fork's `usb_audio` in this setup. See [USB audio](#usb-audio-esphomes-or-the-forks). |
 | Webcams | ❌ | ❌ picture, ⚠️ microphone | See [Webcams](#webcams). |
+| USB Ethernet adapters, 4G modules in ECM/RNDIS mode | – | ❌ | Not supported. See [USB Ethernet](#usb-ethernet-not-supported). |
 | USB hub | – | – | Needs `enable_hubs: true`, and `full_speed_only: true` for keyboards and mice behind it: see [below](#usb-versions-speeds-and-hubs). |
 
 "✅" for gamepads, remotes, IR receivers and touch screens means the code path exists in the
@@ -540,6 +541,31 @@ tested here**; listed so you know what exists:
 | `usb_cdc_acm` | CDC-ACM serial devices; also upstream |
 | `usb_bluetooth` | USB Bluetooth dongles as HCI controller |
 | `usb_uvc` | webcams (frames only, no camera platform), see [Webcams](#webcams) |
+
+### USB Ethernet: not supported
+
+Neither ESPHome-dev (checked 19 Oct 2026) nor the fork (`80faf2e`) can use a USB network
+adapter. ESPHome's `ethernet` component only knows RMII PHYs (LAN8720, IP101, …) and SPI chips
+(W5500, DM9051, CH390, ENC28J60, …), and the fork has no USB network client. No ESPHome component
+for it turned up elsewhere either.
+
+In plain ESP-IDF it exists: Espressif's esp-iot-solution has a
+[USB ECM host driver](https://docs.espressif.com/projects/esp-iot-solution/en/latest/usb/usb_host/usb_ecm.html)
+(tested with CH397A, RTL8152B and NX7202D adapters and several 4G modules, also on the ESP32-P4)
+and a [USB RNDIS host driver](https://docs.espressif.com/projects/esp-iot-solution/en/latest/usb/usb_host/usb_rndis.html).
+Many cheap adapters (ASIX AX88179, RTL8153 in its default mode) do not speak ECM and would not
+work with these drivers.
+
+Bringing that into ESPHome would need a component of its own that:
+
+1. lives alongside the fork's `usb_host` (Espressif's driver registers its own USB host client,
+   the same problem as ESPHome-dev's `usb_audio`, see [USB audio](#usb-audio-esphomes-or-the-forks));
+2. presents the adapter as a network interface the way `wifi` and `ethernet` do, so the API, OTA
+   and logs run over it;
+3. accepts 12 Mbit/s when `full_speed_only` is on for a hub.
+
+For a wired network on an ESP32-P4 screen, an SPI Ethernet module (W5500, CH390, …) on free GPIOs
+is the supported route today.
 
 ## Troubleshooting
 
