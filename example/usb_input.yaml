@@ -8,7 +8,7 @@
 # or a small USB hub (then also full_speed_only, see below).
 #
 # usb_host, usb_hid and hid come from the p1ngb4ck fork (upstream ESPHome has no HID support
-# yet), pinned to a commit because testing_dev changes daily. 4e93938 (17 Oct 2026) is newer than
+# yet), pinned to a commit because testing_dev changes daily. 80faf2e (19 Oct 2026) is newer than
 # the hardware-tested caa97336f20007c905b2f3ce89bee87a8f4595f4: see the README.
 # lvgl_usb_hid (this repo) connects them to upstream ESPHome's lvgl.
 #
@@ -21,7 +21,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/p1ngb4ck/esphome
-      ref: 4e93938ddddeccfe0c6d545e07628a75f4be7443
+      ref: 80faf2e5523b007878248d108959afaf5f48a5de
     components: [usb_host, usb_hid, hid]
   - source:
       type: git

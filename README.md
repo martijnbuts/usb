@@ -7,12 +7,15 @@ Tested on the **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B** (Type-A USB 2.0 OTG High
 ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit `caa9733` (13 Oct 2026).
 
 > **Fork commit:** the example now pins the fork at
-> [`4e93938`](https://github.com/p1ngb4ck/esphome/commit/4e93938ddddeccfe0c6d545e07628a75f4be7443)
-> (17 Oct 2026). It adds the gamepad layer, touch screens, MCE IR receivers, Logitech receiver
-> handling and fixes for low-speed devices behind a hub. The example passes `esphome config`
-> with this commit on ESPHome-dev of 19 Oct 2026, and `lvgl_usb_hid` uses only fork API that did
-> not change, but it has **not been compiled or tested on the hardware yet**; use
-> `caa97336f20007c905b2f3ce89bee87a8f4595f4` if you want the tested one.
+> [`80faf2e`](https://github.com/p1ngb4ck/esphome/commit/80faf2e5523b007878248d108959afaf5f48a5de)
+> (19 Oct 2026). Since the tested `caa9733` it adds the gamepad layer, touch screens, MCE IR
+> receivers, Logitech receiver handling, hub fixes (every hub port powered before a device is
+> reset, a retry at address 0 when a device does not answer at its new address) and a reworked
+> `usb_audio`. The example passes `esphome config` with this commit on ESPHome-dev of
+> 19 Oct 2026, and `lvgl_usb_hid` uses only fork API that did not change, but it has **not been
+> compiled or tested on the hardware yet**; use `caa97336f20007c905b2f3ce89bee87a8f4595f4` if you
+> want the tested one. (`4e93938` of 17 Oct, briefly pinned here, carried the fork's own
+> low-speed-behind-a-hub mechanisms, which the fork dropped again on 18 Oct.)
 
 - [What you get](#what-you-get)
 - [Supported USB devices](#supported-usb-devices)
@@ -95,13 +98,12 @@ limitation.
 So **a keyboard or mouse behind a USB 2.0 hub is not found by default**, while a high-speed
 device (a USB stick) behind the same hub is.
 
-The fix is `full_speed_only: true` in `usb_host` (from the fork). `espressif/usb` only gained
-this as `fsls_only` in 1.6.0, and ESP-IDF 6.1's HAL lacks the setter that version expects, so
-the fork backports it into its patched 1.4.1.
-The high-speed controller then skips the high-speed handshake, so the hub and everything behind
-it run at full or low speed: the hub passes full-speed traffic straight on, and low-speed devices
-behind it get the *PRE* packet they need. The fork also patches `espressif/usb` so that a
-low-speed device behind a full-speed hub can be enumerated at all.
+The fix is `full_speed_only: true` in `usb_host` (from the fork). The high-speed controller then
+ignores the high-speed handshake, so the hub and everything behind it run at full or low speed:
+the hub passes full-speed traffic straight on and sends low-speed traffic after a *PRE* packet,
+which needs no split transactions. Espressif documents exactly this as the way around the missing
+transaction translator (`fsls_only`, added in `espressif/usb` 1.6.0). ESP-IDF 6.1's HAL lacks a
+setter that 1.6.0 expects, so the fork backports `fsls_only` into its patched 1.4.1 instead.
 
 ```yaml
 usb_host:
@@ -116,32 +118,80 @@ usb_host:
 | USB 2.0 hub, keyboard/mouse behind it, default settings | ❌ | no split transactions; log says `transaction translator (TT) is not supported` |
 | USB 2.0 hub, keyboard/mouse behind it, `full_speed_only: true` | ✅ | the hub runs as a full-speed hub |
 | USB 1.1 hub (full speed), keyboard/mouse behind it | ✅ | it is a full-speed hub anyway; `full_speed_only` makes no difference |
+| keyboard with a built-in hub (extra USB ports) | ⚠️ | that hub is a USB 2.0 or 1.1 hub like any other: the two rows above apply |
 | USB 2.0 hub, only high-speed devices behind it | ✅ | without `full_speed_only` |
 | keyboard/mouse **and** a high-speed device (stick, webcam) on one hub | ⚠️ | only with `full_speed_only: true`; the high-speed device then runs at 12 Mbit/s |
+| hub behind a hub | ✅ | `espressif/usb` allows several hub levels (`CONFIG_USB_HOST_HUB_MULTI_LEVEL`, on by default) |
 
 Good to know:
 
-- Low-speed devices behind a hub are a little slower to enumerate: the controller can send only
-  one PRE-marked transaction per 1 ms frame. For keyboards and mice that makes no noticeable
-  difference. The fork commit pinned in the example (`4e93938`) enforces this per frame for
-  every control transfer and fixes several hub-port races; with older fork commits low-speed
-  devices behind a hub are less reliable.
-- `log_low_speed_hub_errors: true` (in `usb_host`) logs every transaction error of a low-speed
-  device behind a full-speed hub (as `[E]`); useful when a device behind a hub does not show up.
+- Low-speed devices behind a full-speed hub: the controller can put only one PRE-marked
+  transaction in a 1 ms frame, so Espressif's driver waits 1 ms between the stages of a control
+  transfer. Enumeration takes a little longer; keystrokes and mouse reports are not affected.
+  The fork followed its own approach here for a few days (pinned commit `4e93938`) and went back
+  to Espressif's on 18 Oct, which is what the commit now pinned does.
 - Every device and endpoint takes host channels (16 on the ESP32-P4); a hub with many devices can
   run out, and the next device is then not enumerated.
-- The ESP32-P4 also has a second, full-speed-only controller (`controllers:` / `dual_host:` in the
-  fork). It only helps if the board brings it out to a connector; the Type-A port of the
-  Waveshare 7B is the high-speed one.
+- `full_speed_only` slows down every high-speed device on the port, not only those behind a hub:
+  a USB stick drops from about 480 to 12 Mbit/s (in practice around 1 MB/s), a webcam to small
+  MJPEG frames. Audio and HID do not notice.
 - The hub rows above follow the `espressif/usb` source and docs and the fork's code; they have
   not been tested with this repo yet.
 
+### The two USB controllers of the ESP32-P4
+
+The chip has two USB host controllers. The fork can run either or both:
+
+| Controller | Speeds | On the Waveshare 7B | Fork option |
+|---|---|---|---|
+| High-speed (UTMI PHY) | high, full, low | the **Type-A** port (item 14 in the wiki) | default |
+| Full-speed (internal FSLS PHY) | full, low | probably the **Type-C "USB 1.1 FS"** port (item 15), see below | `controllers: full_speed` or `dual_host: true` |
+
+The full-speed controller shares its two pin pairs with USB-Serial-JTAG: out of reset it uses
+GPIO26/27 and USB-Serial-JTAG GPIO24/25. The Waveshare wiki calls the second Type-C port "USB 1.1
+FS direct output" without naming pins; the only full-speed pins on the chip that can reach a
+connector directly are these two pairs, and GPIO26/27 are the board's RS485 lines, so that port is
+most likely GPIO24/25. To use it as a second host:
+
+```yaml
+usb_host:
+  dual_host: true      # high-speed (Type-A) and full-speed controller together
+  fs_pins: "24_25"     # quoted: unquoted YAML reads 24_25 as the number 2425
+```
+
+That moves USB-Serial-JTAG to GPIO26/27 (the RS485 pins), so logging over that Type-C port is
+gone and RS485 cannot be used at the same time. The wiki describes that Type-C port for power and
+flashing, so it probably does not supply 5 V to a device; a powered hub in between solves that.
+With dual host, keyboard and mouse could sit on the full-speed port (directly or behind any hub)
+while the Type-A port keeps high speed for a USB stick or webcam. **Untested**; the pin pair is
+inferred, not confirmed by a schematic.
+
+### Other `usb_host` options in the fork
+
+| Option | Default | What it does |
+|---|---|---|
+| `enable_hubs` | `false` | external hubs (`CONFIG_USB_HOST_HUBS_SUPPORTED`) |
+| `full_speed_only` | `false` | the high-speed controller as a full/low-speed host (ESP32-P4 only) |
+| `dual_host` / `controllers` | high-speed only | `both`, `high_speed` or `full_speed` (ESP32-P4 only) |
+| `fs_pins` | `"26_27"` | pin pair of the full-speed controller (ESP32-P4) |
+| `max_packet_size` | 512 on the P4, 64 elsewhere | size of each transfer buffer; 512 fits a high-speed bulk packet (USB sticks) |
+| `max_transfer_requests` | 16 | transfers each client (each `usb_hid`, `usb_audio`, …) can have in flight (1–32) |
+| `mode_switch` | – | devices that start in the wrong mode: `usb_modeswitch`-style bulk messages, a control request, or `hid2hci` for Bluetooth dongles in HID proxy mode |
+
+The FIFO division of each controller (how much room received data, bulk and isochronous OUT get)
+is chosen per controller by the components that need it (`usb_audio` on a full-speed controller),
+not by an option.
+
 Sources: [ESP-USB host guide (ESP32-P4)](https://docs.espressif.com/projects/esp-usb/en/latest/esp32p4/usb_host.html)
 (speeds, hubs, transaction translator, `fsls_only`, channels), the
-[`espressif/usb` changelog](https://github.com/espressif/esp-usb/blob/master/host/usb/CHANGELOG.md)
-and [`hub.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hub.c) (the TT check), and the fork's
-[`usb_host`](https://github.com/p1ngb4ck/esphome/tree/4e93938ddddeccfe0c6d545e07628a75f4be7443/esphome/components/usb_host)
-(`full_speed_only`, `log_low_speed_hub_errors`, the low-speed-behind-hub patch).
+[`espressif/usb` changelog](https://github.com/espressif/esp-usb/blob/master/host/usb/CHANGELOG.md),
+[`hub.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hub.c) (the TT check) and
+[`hcd_dwc.c`](https://github.com/espressif/esp-usb/blob/master/host/usb/src/hcd_dwc.c) (the 1 ms
+low-speed delay), the fork's
+[`usb_host`](https://github.com/p1ngb4ck/esphome/tree/80faf2e5523b007878248d108959afaf5f48a5de/esphome/components/usb_host)
+(options, `fsls_only` backport, FS pin selection) and the
+[Waveshare ESP32-P4-WIFI6-Touch-LCD-7B wiki](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B)
+(ports, RS485 on GPIO26/27).
 
 ## How it works
 
@@ -246,7 +296,7 @@ packages:
   usb: !include usb_input.yaml
 ```
 
-The example pins the fork to a commit (`4e93938`, see the note at the top), because its
+The example pins the fork to a commit (`80faf2e`, see the note at the top), because its
 `testing_dev` branch changes daily. Upstream
 ESPHome-dev (checked 2026-10-16) has `usb_host`, `usb_uart` and `usb_cdc_acm`, but no
 `usb_hid` yet.
@@ -306,7 +356,7 @@ Keys are named as on Linux without `KEY_` (`ENTER`, `F1`, `A`, `LEFT`), consumer
 `lvgl_usb_hid` only maps keyboard keys and mouse motion to LVGL, so a gamepad does not move the
 focus or a cursor on its own.
 
-Since fork commit `4e93938` every pad is reported in **one common layout**, whatever its brand
+Since fork commit `4e93938` (17 Oct 2026) every pad is reported in **one common layout**, whatever its brand
 or protocol, so an automation written for one pad works with another.
 
 Which gamepads (over USB):
@@ -419,14 +469,15 @@ AttributeError: module 'esphome.components.usb_host' has no attribute 'request_p
 ```
 
 Load the fork's `usb_audio` from the same fork commit instead (checked with `esphome config` on
-ESPHome-dev of 19 Oct 2026, not yet compiled or tested on the hardware):
+ESPHome-dev of 19 Oct 2026 with fork commit `80faf2e`, not yet compiled or tested on the
+hardware):
 
 ```yaml
 external_components:
   - source:
       type: git
       url: https://github.com/p1ngb4ck/esphome
-      ref: 4e93938ddddeccfe0c6d545e07628a75f4be7443
+      ref: 80faf2e5523b007878248d108959afaf5f48a5de
     components: [usb_host, usb_hid, hid, usb_audio]
 
 usb_audio:
