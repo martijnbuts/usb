@@ -26,7 +26,7 @@ ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit `caa9733
 - [USB audio: ESPHome's or the fork's](#usb-audio-esphomes-or-the-forks)
 - [Webcams](#webcams)
 - [Other USB devices in the fork](#other-usb-devices-in-the-fork) (and [USB Ethernet](#usb-ethernet-not-supported))
-- [Troubleshooting](#troubleshooting)
+- [Troubleshooting](#troubleshooting) (and [a device that stops after a read error](#a-device-stops-after-one-read-error-interface-0-stopped-status-1))
 - [Limitations](#limitations)
 
 ## What you get
@@ -597,6 +597,45 @@ is the supported route today.
   devices.
 - **Two devices end up in the "wrong" entry:** pin each `usb_hid` entry to a device with
   `vid`/`pid`; `usb_host` logs them as `046D:C52B …` when a device connects.
+- **A device stops responding and the log says `Interface 0 stopped (status 1)`:** see below.
+
+### A device stops after one read error (`Interface 0 stopped (status 1)`)
+
+Seen on 19 Oct 2026 with a wired Xbox 360-style pad on the Waveshare 7B, fork `caa9733`: after a
+few minutes of play the pad went dead, and the log had one line:
+
+```
+[W][usb_hid:260][usb_task]: Interface 0 stopped (status 1)
+```
+
+Status 1 is `USB_TRANSFER_STATUS_ERROR`: one interrupt-IN transfer failed (a CRC error, a
+glitch on the cable, a babble). The fork's `usb_hid` then stops reading that interface for good,
+until the device is unplugged and plugged in again. The newest fork commit (`c550f96`, 19 Oct)
+still does this.
+
+This repo has a copy of the fork's `usb_hid` (from `c550f96`) with one change
+([`docs/patches/usb_hid-read-retry.patch`](docs/patches/usb_hid-read-retry.patch)): on any error
+other than "cancelled" or "no device" it halts, flushes and clears the endpoint and starts reading
+again after 20 ms, at most 20 times in 10 seconds (then it gives up and logs
+`keeps failing`). Each retry is logged as `Interface 0 read failed (status 1); reading again`.
+
+To use it, take `usb_hid` from this repo and only `usb_host` and `hid` from the fork:
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/p1ngb4ck/esphome
+      ref: c550f96eb2a208f5f4d6d20e72fc15ef93192712
+    components: [usb_host, hid]
+  - source:
+      type: git
+      url: https://github.com/martijnbuts/usb
+    components: [lvgl_usb_hid, usb_hid]
+```
+
+The copy must match the fork commit of `usb_host` and `hid` (it uses their internals); with
+another fork commit, apply the patch to that commit's `usb_hid` instead.
 
 ## Limitations
 
@@ -612,5 +651,7 @@ is the supported route today.
 ## Credits
 
 - `usb_host`, `usb_hid`, `hid` and the cursor approach: [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome).
+  `components/usb_hid` here is a copy of the fork's `usb_hid` (commit `c550f96`) with the read-retry
+  change; it keeps ESPHome's licensing (C++ under GPL-3.0, Python under MIT).
   The HID report parser there comes from [fsievers22/esphome-ble-remote](https://github.com/fsievers22/esphome-ble-remote).
 - USB ports: Waveshare [ESP32-P4-WIFI6-Touch-LCD-7B wiki](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B) and [schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B/ESP32-P4-WIFI6-Touch-LCD-7B.pdf).

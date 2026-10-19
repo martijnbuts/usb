@@ -1,0 +1,82 @@
+diff -ru a/esphome/components/usb_hid/usb_hid.cpp b/esphome/components/usb_hid/usb_hid.cpp
+--- a/esphome/components/usb_hid/usb_hid.cpp
++++ b/esphome/components/usb_hid/usb_hid.cpp
+@@ -2,6 +2,7 @@
+ 
+ #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
+ 
++#include "esphome/core/hal.h"
+ #include "esphome/core/log.h"
+ 
+ #include <algorithm>
+@@ -382,7 +383,17 @@
+         if (generation != this->generation_.load(std::memory_order_acquire))
+           return;
+         if (!status.success) {
+-          ESP_LOGW(TAG, "Interface %u stopped (status %u)", number, status.error_code);
++          // Unplugged or cancelled on purpose: stop. Any other error (a glitch on the cable, a
++          // babble or a timeout) used to stop the pad for good; now the endpoint is cleared and
++          // reading starts again (martijnbuts, 19-10-2026).
++          if (status.error_code == USB_TRANSFER_STATUS_CANCELED || status.error_code == USB_TRANSFER_STATUS_NO_DEVICE) {
++            ESP_LOGW(TAG, "Interface %u stopped (status %u)", number, status.error_code);
++            return;
++          }
++          const uint16_t code = status.error_code;
++          this->defer([this, index, number, ep, mps, generation, code]() {
++            this->restart_read_(index, number, ep, mps, generation, code);
++          });
+           return;
+         }
+         if (status.data_len > 0) {
+@@ -402,6 +413,31 @@
+     ESP_LOGE(TAG, "Read on interface %u not submitted", number);
+ }
+ 
++// Main loop: clear the endpoint after a failed read and read again, at most 20 times in 10 s
++void USBHIDClient::restart_read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation,
++                                 uint16_t code) {
++  if (generation != this->generation_.load(std::memory_order_acquire) || this->device_handle_ == nullptr)
++    return;
++  const uint32_t now = millis();
++  if (now - this->retry_window_start_ > 10000) {
++    this->retry_window_start_ = now;
++    this->retries_ = 0;
++  }
++  if (++this->retries_ > 20) {
++    ESP_LOGW(TAG, "Interface %u keeps failing (status %u); stopped until the device is plugged in again", number,
++             code);
++    return;
++  }
++  ESP_LOGW(TAG, "Interface %u read failed (status %u); reading again", number, code);
++  usb_host_endpoint_halt(this->device_handle_, ep);
++  usb_host_endpoint_flush(this->device_handle_, ep);
++  usb_host_endpoint_clear(this->device_handle_, ep);
++  this->set_timeout(20, [this, index, number, ep, mps, generation]() {
++    if (generation == this->generation_.load(std::memory_order_acquire))
++      this->read_(index, number, ep, mps, generation);
++  });
++}
++
+ // -- Reports (main loop) -------------------------------------------------------------------
+ 
+ void USBHIDClient::report_(size_t index, const uint8_t *data, size_t length) {
+diff -ru a/esphome/components/usb_hid/usb_hid.h b/esphome/components/usb_hid/usb_hid.h
+--- a/esphome/components/usb_hid/usb_hid.h
++++ b/esphome/components/usb_hid/usb_hid.h
+@@ -96,6 +96,7 @@
+   void descriptor_done_(size_t index, const uint8_t *data, size_t length);
+   void start_reading_();
+   void read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation);
++  void restart_read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation, uint16_t code);
+   void report_(size_t index, const uint8_t *data, size_t length);
+   void attach_pad_();
+   void thrustmaster_();
+@@ -107,6 +108,8 @@
+   LockFreeQueue<Report, QUEUE_SIZE> reports_{};
+   EventPool<Report, QUEUE_SIZE - 1> report_pool_{};
+   RawHIDDriver *raw_driver_{nullptr};
++  uint32_t retry_window_start_{0};
++  uint8_t retries_{0};
+   size_t pad_index_{0};  // the interface the gamepad driver talks to
+ #ifdef USE_TEXT_SENSOR
+   text_sensor::TextSensor *device_name_sensor_{nullptr};
