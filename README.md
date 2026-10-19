@@ -9,8 +9,9 @@ ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit `caa9733
 > **Fork commit:** the example now pins the fork at
 > [`4e93938`](https://github.com/p1ngb4ck/esphome/commit/4e93938ddddeccfe0c6d545e07628a75f4be7443)
 > (17 Oct 2026). It adds the gamepad layer, touch screens, MCE IR receivers, Logitech receiver
-> handling and fixes for low-speed devices behind a hub. `lvgl_usb_hid` uses only fork API that
-> did not change, but this commit has **not been compiled or tested on the hardware yet**; use
+> handling and fixes for low-speed devices behind a hub. The example passes `esphome config`
+> with this commit on ESPHome-dev of 19 Oct 2026, and `lvgl_usb_hid` uses only fork API that did
+> not change, but it has **not been compiled or tested on the hardware yet**; use
 > `caa97336f20007c905b2f3ce89bee87a8f4595f4` if you want the tested one.
 
 - [What you get](#what-you-get)
@@ -19,6 +20,7 @@ ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit `caa9733
 - [How it works](#how-it-works)
 - [Usage](#usage)
 - [Gamepads](#gamepads)
+- [USB audio: ESPHome's or the fork's](#usb-audio-esphomes-or-the-forks)
 - [Webcams](#webcams)
 - [Other USB devices in the fork](#other-usb-devices-in-the-fork)
 - [Troubleshooting](#troubleshooting)
@@ -53,7 +55,8 @@ component turns it into screen input; "Automations" means `usb_hid` delivers it 
 | Gamepads, joysticks, steering wheels | ❌ (not yet) | ✅ `on_key` (buttons, D-pad), `on_control` (sticks, triggers), `sensor` | One layout for every pad. See [Gamepads](#gamepads). |
 | USB touchscreens, pens, drawing tablets | ⚠️ as a touchpad | ✅ | The first contact becomes relative motion with the left button held: dragging moves the cursor and presses, a touch does **not** tap where you touch. Motion is in the device's own units, so it can be fast. |
 | Barcode scanners in keyboard mode | ✅ as keyboard | ✅ `on_text` | They are keyboards; pick the layout the scanner is set to. |
-| Webcams | ❌ | ❌ | See [Webcams](#webcams). |
+| USB sound cards, headsets, USB microphones | – | ✅ `microphone`, `speaker` | Through the fork's `usb_audio` in this setup. See [USB audio](#usb-audio-esphomes-or-the-forks). |
+| Webcams | ❌ | ❌ picture, ⚠️ microphone | See [Webcams](#webcams). |
 | USB hub | – | – | Needs `enable_hubs: true`, and `full_speed_only: true` for keyboards and mice behind it: see [below](#usb-versions-speeds-and-hubs). |
 
 "✅" for gamepads, remotes, IR receivers and touch screens means the code path exists in the
@@ -390,15 +393,88 @@ Built-in gamepad navigation in `lvgl_usb_hid` (D-pad moves the focus, south pres
 left stick moves the cursor) would be a small addition on top of these events; it is not there
 yet.
 
+## USB audio: ESPHome's or the fork's
+
+Since 18 Oct 2026 ESPHome-dev has its own `usb_audio` component
+([#11728](https://github.com/esphome/esphome/pull/11728)). The fork has a different component
+with the **same name**. Which one you get depends on what `external_components` loads:
+
+| | ESPHome-dev `usb_audio` | Fork `usb_audio` |
+|---|---|---|
+| Driver | Espressif's `usb_host_uac` 1.5.0 (its own USB host client) | written in the fork, a client of the fork's `usb_host` |
+| Platforms | `microphone`, `speaker` | `microphone`, `speaker`, `media_player`, `audio_dac` (volume) |
+| Devices | one `usb_audio` entry, one microphone and one speaker on it; takes the first audio device | several entries (`MULTI_CONF`), each optionally pinned with `vid` / `pid` |
+| Formats | 8–96 kHz, 8–32 bit, 1–2 channels | 8–96 kHz, 8–32 bit, microphone up to 8 channels (pick channels), multichannel cards as one stereo pair |
+| Extras | volume and mute on the speaker | volume curve, feedback endpoint, per-device quirks |
+| Chips | ESP32-P4, S2, S3, S31, H4 | ESP32-P4, S2, S3 |
+| Works with this repo's setup | **no** | **yes** |
+
+**On the ESP32-P4 with this repo you need the fork's `usb_audio`.** This setup replaces
+ESPHome's `usb_host` with the fork's (for `usb_hid`). ESPHome's `usb_audio` calls
+`usb_host.request_periodic_fifo()`, which only ESPHome's own `usb_host` has, so validation stops
+with:
+
+```
+AttributeError: module 'esphome.components.usb_host' has no attribute 'request_periodic_fifo'
+```
+
+Load the fork's `usb_audio` from the same fork commit instead (checked with `esphome config` on
+ESPHome-dev of 19 Oct 2026, not yet compiled or tested on the hardware):
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/p1ngb4ck/esphome
+      ref: 4e93938ddddeccfe0c6d545e07628a75f4be7443
+    components: [usb_host, usb_hid, hid, usb_audio]
+
+usb_audio:
+  - id: usb_mic_device
+    # vid: 0x046D   # optional: only this device
+    # pid: 0x0825
+
+microphone:
+  - platform: usb_audio
+    id: usb_mic
+    usb_audio_id: usb_mic_device
+    sample_rate: 16000      # what voice_assistant / micro_wake_word want
+    num_channels: 1
+```
+
+Without `usb_hid` (no keyboard or mouse) ESPHome's own `usb_audio` and `usb_host` work on their
+own and need no fork at all.
+
+Good to know:
+
+- Audio uses isochronous transfers. With `full_speed_only: true` (keyboard and mouse behind a
+  hub, see [above](#usb-versions-speeds-and-hubs)) a USB 2.0 sound card runs at full speed; for
+  16 kHz mono speech that is plenty, high sample rates and many channels may not fit.
+- The fork's `usb_host` gives each interface of a device to the component that asks for it, so one
+  device can feed several components: the HID buttons of a headset to `usb_hid` and its audio to
+  `usb_audio`, or a webcam's microphone to `usb_audio` (see [Webcams](#webcams)).
+
 ## Webcams
 
-**Not with this setup.** The fork does contain an experimental `usb_uvc` component: it negotiates
-an MJPEG or uncompressed stream with a UVC (standard USB video) camera, streams it over
+**Picture: not with this setup.** The fork does contain an experimental `usb_uvc` component: it
+negotiates an MJPEG or uncompressed stream with a UVC (standard USB video) camera, streams it over
 isochronous transfers and assembles frames in two PSRAM buffers. But it only hands those frames to
 C++ code: there is no ESPHome `camera` platform for it, so no camera entity in Home Assistant and
-no LVGL image, and it has no tests in the fork. Showing a webcam on the screen would need your own
-component that decodes the MJPEG frames (the ESP32-P4 has a hardware JPEG decoder) into an LVGL
-canvas or image. It is not part of this repo and has not been tried here.
+no LVGL image, and nothing else in the fork uses it. Showing a webcam on the screen would need
+your own component that decodes the MJPEG frames (the ESP32-P4 has a hardware JPEG decoder) into
+an LVGL canvas or image. It is not part of this repo and has not been tried here.
+
+Elsewhere: [anton-malakhov/esphome_webcam](https://github.com/anton-malakhov/esphome_webcam) makes
+a USB webcam an ESPHome camera, but only on the ESP32-S2/S3 at USB 1.1 full speed with MJPEG. It
+runs its own USB host stack (Espressif's `usb_stream`), so it does not combine with `usb_host` /
+`usb_hid`, and its last update (Sep 2025) predates current ESPHome-dev. Espressif's
+`usb_host_uvc` shows a USB camera on an ESP32-P4 LCD in plain ESP-IDF, not in ESPHome.
+
+**Microphone: possible, untested.** A webcam with a microphone is one USB device with separate
+video and audio interfaces, and the microphone is a normal USB audio (UAC) interface. The fork's
+`usb_host` hands the audio interfaces to the fork's `usb_audio`, so the webcam's microphone can be
+an ESPHome `microphone` (for example for a voice assistant) even without the picture. Nobody has
+reported this working in ESPHome yet; with `full_speed_only: true` the webcam runs at full speed.
 
 ## Other USB devices in the fork
 
@@ -408,11 +484,11 @@ tested here**; listed so you know what exists:
 | Component | For |
 |---|---|
 | `usb_storage` | USB sticks and card readers (mass storage) |
-| `usb_audio` | USB sound cards / headsets: speaker, microphone, media player |
+| `usb_audio` | USB sound cards / headsets: speaker, microphone, media player; see [USB audio](#usb-audio-esphomes-or-the-forks) |
 | `usb_uart` | USB–serial adapters (CH34x, CH934x, FTDI, CP210x, PL2303); also upstream |
 | `usb_cdc_acm` | CDC-ACM serial devices; also upstream |
 | `usb_bluetooth` | USB Bluetooth dongles as HCI controller |
-| `usb_uvc` | webcams, see above |
+| `usb_uvc` | webcams (frames only, no camera platform), see [Webcams](#webcams) |
 
 ## Troubleshooting
 
