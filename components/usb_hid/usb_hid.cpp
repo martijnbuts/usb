@@ -1,7 +1,10 @@
 // Copy of usb_hid from github.com/p1ngb4ck/esphome at c550f96eb2a208f5f4d6d20e72fc15ef93192712
-// (19 Oct 2026), with one change: a failed interrupt-IN read (USB_TRANSFER_STATUS_ERROR and the
-// like) clears the endpoint and reads again, instead of stopping the device until it is plugged in
-// again. See docs/patches/usb_hid-read-retry.patch and the README (Troubleshooting).
+// (19 Oct 2026), with these changes (search for "martijnbuts"):
+// - a failed interrupt-IN read clears the endpoint and reads again instead of stopping the device
+//   until it is plugged in again; when that keeps failing, the root port is powered off and on
+//   (a software replug, at most once a minute);
+// - every 5 s a log line with the number of reports received and dropped.
+// See docs/patches/usb_hid-read-retry.patch and the README (Troubleshooting).
 #include "usb_hid.h"
 
 #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
@@ -30,6 +33,7 @@ static constexpr uint8_t XBOXONE_SUBCLASS = 0x47;
 static constexpr uint8_t XBOXONE_PROTOCOL = 0xD0;
 
 void USBHIDClient::setup() {
+  this->set_interval("hid_stats", 5000, [this]() { this->log_stats_(); });
   this->add_class_match(USB_CLASS_HID);
   this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRED);
   this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRELESS);
@@ -77,6 +81,19 @@ void USBHIDClient::set_device_layout(const std::string &key, const hid::Keyboard
 void USBHIDClient::dump_config() {
   usb_host::USBClient::dump_config();
   ESP_LOGCONFIG(TAG, "  Num Lock at start: %s", YESNO((this->leds_ & hid::LED_NUM_LOCK) != 0));
+}
+
+// Diagnostics (martijnbuts, 19-10-2026): reports received and dropped (report pool full), every
+// 5 s while reports arrive, and once when they stop
+void USBHIDClient::log_stats_() {
+  const uint32_t rx = this->rx_count_.exchange(0, std::memory_order_relaxed);
+  const uint32_t dropped = this->drop_count_.exchange(0, std::memory_order_relaxed);
+  if (rx != 0 || dropped != 0) {
+    ESP_LOGI(TAG, "%u reports in 5 s, %u dropped (queue full)", (unsigned) rx, (unsigned) dropped);
+  } else if (this->stats_active_) {
+    ESP_LOGI(TAG, "No reports for 5 s");
+  }
+  this->stats_active_ = rx != 0;
 }
 
 void USBHIDClient::loop() {
@@ -401,7 +418,10 @@ void USBHIDClient::read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps
           return;
         }
         if (status.data_len > 0) {
+          this->rx_count_.fetch_add(1, std::memory_order_relaxed);
           Report *report = this->report_pool_.allocate();
+          if (report == nullptr)
+            this->drop_count_.fetch_add(1, std::memory_order_relaxed);
           if (report != nullptr) {
             report->interface = index;
             report->length = static_cast<uint8_t>(std::min(status.data_len, REPORT_MAX));
@@ -428,8 +448,18 @@ void USBHIDClient::restart_read_(uint8_t index, uint8_t number, uint8_t ep, uint
     this->retries_ = 0;
   }
   if (++this->retries_ > 20) {
-    ESP_LOGW(TAG, "Interface %u keeps failing (status %u); stopped until the device is plugged in again", number,
-             code);
+    // The device no longer answers at all (seen with a wired Xbox 360 pad: every read fails at
+    // once, unplugging fixes it). Do the unplugging in software: power the root port off and on,
+    // so the device is enumerated again. At most once a minute.
+    if (this->last_port_reset_ == 0 || now - this->last_port_reset_ > 60000) {
+      this->last_port_reset_ = now;
+      ESP_LOGW(TAG, "Interface %u keeps failing (status %u); resetting the USB port", number, code);
+      usb_host_lib_set_root_port_power(false);
+      this->set_timeout("port_power", 500, []() { usb_host_lib_set_root_port_power(true); });
+    } else {
+      ESP_LOGW(TAG, "Interface %u keeps failing (status %u); stopped until the device is plugged in again",
+               number, code);
+    }
     return;
   }
   ESP_LOGW(TAG, "Interface %u read failed (status %u); reading again", number, code);

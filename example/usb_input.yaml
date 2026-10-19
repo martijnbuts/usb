@@ -7,9 +7,10 @@
 # (USB 2.0 OTG High-Speed). Mouse and keyboard at the same time: a combo receiver (one dongle)
 # or a small USB hub (then also full_speed_only, see below).
 #
-# usb_host, usb_hid and hid come from the p1ngb4ck fork (upstream ESPHome has no HID support
-# yet), pinned to a commit because testing_dev changes daily. 80faf2e (19 Oct 2026) is newer than
-# the hardware-tested caa97336f20007c905b2f3ce89bee87a8f4595f4: see the README.
+# usb_host and hid come from the p1ngb4ck fork (upstream ESPHome has no HID support yet), pinned
+# to a commit because testing_dev changes daily: c550f96 (19 Oct 2026), compiled and running on
+# the Waveshare 7B. usb_hid comes from this repo: the fork's copy of that commit with a fix for
+# devices that stop after a read error (see the README, Troubleshooting).
 # lvgl_usb_hid (this repo) connects them to upstream ESPHome's lvgl.
 #
 # Keyboard shortcuts for automations go in usb_hid with on_key, for example:
@@ -21,12 +22,12 @@ external_components:
   - source:
       type: git
       url: https://github.com/p1ngb4ck/esphome
-      ref: 80faf2e5523b007878248d108959afaf5f48a5de
-    components: [usb_host, usb_hid, hid]
+      ref: c550f96eb2a208f5f4d6d20e72fc15ef93192712
+    components: [usb_host, hid]
   - source:
       type: git
       url: https://github.com/martijnbuts/usb
-    components: [lvgl_usb_hid]
+    components: [lvgl_usb_hid, usb_hid]
 
 usb_host:
   # A hub may sit in between (keyboard and mouse both in one port)

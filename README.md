@@ -6,7 +6,15 @@ ESPHome-dev** with ESP-IDF 6.1.
 Tested on the **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B** (Type-A USB 2.0 OTG High-Speed port),
 ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit `caa9733` (13 Oct 2026).
 
-> **Fork commit:** the example now pins the fork at
+> **Update 19 Oct 2026, evening:** the example now pins the fork at
+> [`c550f96`](https://github.com/p1ngb4ck/esphome/commit/c550f96eb2a208f5f4d6d20e72fc15ef93192712)
+> (19 Oct 2026, 20:32) and takes `usb_hid` from this repo (a copy of the fork's with a fix, see
+> [Troubleshooting](#a-device-stops-after-one-read-error-interface-0-stopped-status-1)). This
+> combination is **compiled and running on the Waveshare 7B** with a wired Xbox 360 pad
+> (`lvgl_usb_hid` included); mice and keyboards were not retested with it. `c550f96` differs from
+> `80faf2e` below only in `usb_host` logging and task stacks.
+>
+> **Fork commit:** the example pinned the fork at
 > [`80faf2e`](https://github.com/p1ngb4ck/esphome/commit/80faf2e5523b007878248d108959afaf5f48a5de)
 > (19 Oct 2026). Since the tested `caa9733` it adds the gamepad layer, touch screens, MCE IR
 > receivers, Logitech receiver handling, hub fixes (every hub port powered before a device is
@@ -310,7 +318,7 @@ packages:
   usb: !include usb_input.yaml
 ```
 
-The example pins the fork to a commit (`80faf2e`, see the note at the top), because its
+The example pins the fork to a commit (`c550f96`, see the note at the top), because its
 `testing_dev` branch changes daily. Upstream
 ESPHome-dev (checked 2026-10-16) has `usb_host`, `usb_uart` and `usb_cdc_acm`, but no
 `usb_hid` yet.
@@ -388,7 +396,13 @@ Which gamepads (over USB):
 | Nintendo-layout HID pads (e.g. PowerA) | ✅ | Buttons swapped to the common positions |
 | Thrustmaster T150 / T300 / T500 wheels | ✅ | Switched from the generic "FFB wheel" mode to their own |
 
-All but the plain HID pads are new in the pinned fork commit and untested here.
+All but the plain HID pads are new in the pinned fork commit. Tested here (19 Oct 2026, fork
+`c550f96`, Waveshare 7B): a **wired Xbox 360 pad**. It reports itself as `045E:028E`, product
+string `Controller`, and the fork picks its `Xbox 360` driver (log: `[hid.gamepad] [usb_input_1]
+Xbox 360`). Buttons, D-pad, sticks and triggers arrive in the common layout below; see
+[Troubleshooting](#a-device-stops-after-one-read-error-interface-0-stopped-status-1) for the one
+problem it showed. Many third-party pads use the same `045E:028E`, so the ID does not tell an
+original from a copy.
 
 What a gamepad delivers:
 
@@ -403,6 +417,16 @@ What a gamepad delivers:
 
 `on_key` fires on press and on release, with `key` and `pressed` as variables; `on_control` gives
 `control` (the name) and `value`.
+
+Good to know (seen with the Xbox 360 pad):
+
+- The digital triggers are buttons too (`BUTTON_12` LT, `BUTTON_13` RT): do not give
+  `BUTTON_13` a menu action ("exit", "back") if the pad is also used to play.
+- The `hid` text sensor of `type: last_key` did not change on gamepad buttons in our test; use
+  `on_key` (or a lambda with `is_key_down()`) for those.
+- In C++ the whole pad is available for a test screen: `get_gamepad_state()` (axes and
+  touchpad), `is_key_down(0x09, n)` for button *n*, `is_key_down(0x01, 0x90…0x93)` for the D-pad,
+  `get_gamepad_driver()`, `list_devices()` (the `usb:VID:PID` key and name) and `rumble()`.
 
 Example: a pad flips through the LVGL pages with the D-pad, goes to the main page with the south
 button, and shows the left stick as a sensor in Home Assistant:
@@ -601,25 +625,44 @@ is the supported route today.
 
 ### A device stops after one read error (`Interface 0 stopped (status 1)`)
 
-Seen on 19 Oct 2026 with a wired Xbox 360-style pad on the Waveshare 7B, fork `caa9733`: after a
-few minutes of play the pad went dead, and the log had one line:
+Seen on 19 Oct 2026 with a wired Xbox 360 pad (`045E:028E`) on the Waveshare 7B: after a while
+(once after 8 minutes of play, later after 30 seconds) the pad went dead, and the log had:
 
 ```
 [W][usb_hid:260][usb_task]: Interface 0 stopped (status 1)
 ```
 
-Status 1 is `USB_TRANSFER_STATUS_ERROR`: one interrupt-IN transfer failed (a CRC error, a
-glitch on the cable, a babble). The fork's `usb_hid` then stops reading that interface for good,
-until the device is unplugged and plugged in again. The newest fork commit (`c550f96`, 19 Oct)
-still does this.
+Status 1 is `USB_TRANSFER_STATUS_ERROR`: an interrupt-IN transfer failed at the USB level (no
+valid answer from the device: a CRC error, a timeout, a glitch on the line). The fork's
+`usb_hid` (also in its newest commit `c550f96`) then stops reading that interface for good.
 
-This repo has a copy of the fork's `usb_hid` (from `c550f96`) with one change
-([`docs/patches/usb_hid-read-retry.patch`](docs/patches/usb_hid-read-retry.patch)): on any error
-other than "cancelled" or "no device" it halts, flushes and clears the endpoint and starts reading
-again after 20 ms, at most 20 times in 10 seconds (then it gives up and logs
-`keeps failing`). Each retry is logged as `Interface 0 read failed (status 1); reading again`.
+What we found by retrying: after the first error, **every** read failed at once (20 retries in
+under a second, each with status 1, endpoint halted, flushed and cleared in between). Only
+unplugging and plugging in the pad brought it back. So the pad itself stopped answering
+properly; it did not disconnect.
 
-To use it, take `usb_hid` from this repo and only `usb_host` and `hid` from the fork:
+**Likely cause: power.** In this test the board was powered from a laptop's USB port
+(500–900 mA), and an Xbox 360 pad draws up to 500 mA by itself, more while it rumbles. A dip of
+the 5 V on the Type-A port gives exactly this kind of transaction error. Power the board from a
+charger or power bank of at least 5 V / 2 A when a pad is plugged in, and avoid rumble on weak
+supplies.
+
+This repo has a copy of the fork's `usb_hid` (from `c550f96`) with these changes
+([`docs/patches/usb_hid-read-retry.patch`](docs/patches/usb_hid-read-retry.patch)):
+
+- On any read error other than "cancelled" or "no device" it halts, flushes and clears the
+  endpoint and reads again after 20 ms (log: `Interface 0 read failed (status 1); reading again`).
+- After 20 failures within 10 seconds it **power-cycles the root port** for 500 ms
+  (`usb_host_lib_set_root_port_power`), so the device is enumerated again as if it had been
+  replugged (log: `keeps failing (status 1); resetting the USB port`), at most once a minute.
+  This compiles with fork `c550f96` on ESP-IDF 6.1; whether the replug brings the pad back has
+  **not been confirmed on the hardware yet**. It also briefly drops every other device on the
+  port (a hub and what is behind it).
+- Every 5 seconds while reports arrive, an INFO line `N reports in 5 s, M dropped (queue full)`,
+  and `No reports for 5 s` once when they stop: handy to see when a device goes quiet.
+
+To use it, take `usb_hid` from this repo and only `usb_host` and `hid` from the fork, as the
+[example](example/usb_input.yaml) does:
 
 ```yaml
 external_components:

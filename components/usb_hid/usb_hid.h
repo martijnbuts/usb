@@ -109,6 +109,11 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   EventPool<Report, QUEUE_SIZE - 1> report_pool_{};
   RawHIDDriver *raw_driver_{nullptr};
   uint32_t retry_window_start_{0};
+  uint32_t last_port_reset_{0};
+  void log_stats_();
+  std::atomic<uint32_t> rx_count_{0};
+  std::atomic<uint32_t> drop_count_{0};
+  bool stats_active_{false};
   uint8_t retries_{0};
   size_t pad_index_{0};  // the interface the gamepad driver talks to
 #ifdef USE_TEXT_SENSOR
