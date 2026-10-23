@@ -627,17 +627,13 @@ is the supported route today.
 - **A device stops responding and the log says `Interface 0 stopped (status 1)`:** see below.
 - **The screen restarts within seconds after an update and rolls back** (log after the rollback:
   `OTA rollback detected`): on 23 Oct 2026 this was not USB but ESPHome-dev's move to esp_hosted
-  3.0.10 (the Wi-Fi link to the C6 on the Waveshare board, esphome PR #21394), with the C6 still on
-  older firmware. Taking `esp32_hosted` from the ESPHome commit before it fixed it:
-
-  ```yaml
-  external_components:
-    - source:
-        type: git
-        url: https://github.com/esphome/esphome
-        ref: ce83a625c10a9d648f66378fd98984c971b4fa0b
-      components: [esp32_hosted]
-  ```
+  3.0.10 (the Wi-Fi link to the C6 on the Waveshare board, esphome PR #21394) while the C6 still
+  ran its factory firmware (it reported its version as `unknown`). Fix: update the C6 in two steps
+  with `update: platform: esp32_hosted, type: embedded` (the firmware is downloaded at build time,
+  so the screen needs no internet): first with `esp32_hosted` taken from ESPHome commit
+  `ce83a625c10a9d648f66378fd98984c971b4fa0b` (host 2.12.13) and C6 firmware 2.12.13, then without
+  that pin (host 3.0.10) and C6 firmware 3.0.10. The 3.0.10 image calls itself version `1`, so Home
+  Assistant does not offer it; start it with `update.perform` and `force_update: true`.
 
 ### A device stops after one read error (`Interface 0 stopped (status 1)`)
 
