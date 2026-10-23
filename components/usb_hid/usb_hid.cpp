@@ -1,10 +1,3 @@
-// Copy of usb_hid from github.com/p1ngb4ck/esphome at c550f96eb2a208f5f4d6d20e72fc15ef93192712
-// (19 Oct 2026), with these changes (search for "martijnbuts"):
-// - a failed interrupt-IN read clears the endpoint and reads again instead of stopping the device
-//   until it is plugged in again; when that keeps failing, the root port is powered off and on
-//   (a software replug, at most once a minute);
-// - every 5 s a log line with the number of reports received and dropped.
-// See docs/patches/usb_hid-read-retry.patch and the README (Troubleshooting).
 #include "usb_hid.h"
 
 #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
@@ -32,8 +25,11 @@ static constexpr uint8_t XBOX_PROTOCOL_WIRELESS = 0x81;
 static constexpr uint8_t XBOXONE_SUBCLASS = 0x47;
 static constexpr uint8_t XBOXONE_PROTOCOL = 0xD0;
 
+// =============================================================================================
+// USBHIDClient: the component, the input everything listens to
+// =============================================================================================
+
 void USBHIDClient::setup() {
-  this->set_interval("hid_stats", 5000, [this]() { this->log_stats_(); });
   this->add_class_match(USB_CLASS_HID);
   this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRED);
   this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRELESS);
@@ -43,44 +39,8 @@ void USBHIDClient::setup() {
   MCEReceiverDriver::for_each([this](const MCEReceiverModel &m) {
     this->add_vendor_match(m.vid, m.pid, (m.flags & MCEReceiverDriver::INTERFACE_2) ? 0xFF : -1);
   });
-  // Which device it is, for a layout of its own (hid::InputDevice).
-  this->add_on_connection_callback([this](bool connected) {
-    this->device_key_.clear();
-    this->device_name_.clear();
-    this->device_layout_ = nullptr;
-    usb_host::UsbDeviceInfo info{};
-    if (connected && this->get_device_info(info)) {
-      char key[16];
-      snprintf(key, sizeof(key), "usb:%04x:%04x", info.vendor_id, info.product_id);
-      this->device_key_ = key;
-      if (info.serial_number[0] != '\0')
-        this->device_key_ += std::string(":") + info.serial_number;
-      this->device_name_ = info.product[0] != '\0' ? info.product : std::string("USB ") + (key + 4);
-      // bcdDevice: the device's release, unless its driver reads its firmware.
-      if (this->get_details().firmware[0] == '\0') {
-        char release[8];
-        snprintf(release, sizeof(release), "%X.%02X", info.bcd_device >> 8, info.bcd_device & 0xFF);
-        this->set_firmware(release);
-      }
-    }
-    this->devices_cb_.call();
-  });
   usb_host::USBClient::setup();
-}
-
-void USBHIDClient::list_devices(std::vector<hid::InputDevice> &out) const {
-  if (!this->device_key_.empty())
-    out.push_back({this->device_key_, this->device_name_, true, this->get_device_kinds()});
-}
-
-void USBHIDClient::set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) {
-  if (key == this->device_key_)
-    this->device_layout_ = layout;
-}
-
-void USBHIDClient::dump_config() {
-  usb_host::USBClient::dump_config();
-  ESP_LOGCONFIG(TAG, "  Num Lock at start: %s", YESNO((this->leds_ & hid::LED_NUM_LOCK) != 0));
+  this->set_interval("hid_stats", 5000, [this]() { this->log_stats_(); });
 }
 
 // Diagnostics (martijnbuts, 19-10-2026): reports received and dropped (report pool full), every
@@ -96,39 +56,290 @@ void USBHIDClient::log_stats_() {
   this->stats_active_ = rx != 0;
 }
 
+// USB task: a failed read is handled on the main loop
+void USBHIDClient::schedule_restart_read_(uint32_t serial, uint8_t index, uint8_t number, uint8_t ep, uint16_t mps,
+                                          uint32_t generation, uint16_t code) {
+  this->defer([this, serial, index, number, ep, mps, generation, code]() {
+    this->restart_read_(serial, index, number, ep, mps, generation, code);
+  });
+}
+
+// Main loop (martijnbuts, 19-10-2026; per device since 23-10-2026): clear the endpoint after a failed
+// read and read again. A device that keeps failing (more than 5 failures without a good read in
+// between) gets the root port power-cycled, so it is enumerated again as if replugged: at most 5
+// times in 5 minutes, then reading stops until a device is plugged in again. Looked up by serial:
+// the device may be gone by now.
+void USBHIDClient::restart_read_(uint32_t serial, uint8_t index, uint8_t number, uint8_t ep, uint16_t mps,
+                                 uint32_t generation, uint16_t code) {
+  USBHIDDevice *device = this->find_device_(serial);
+  if (device == nullptr || generation != device->generation_.load(std::memory_order_acquire) ||
+      device->dev_->handle == nullptr)
+    return;
+  const uint32_t now = millis();
+  if (device->read_ok_.exchange(false, std::memory_order_relaxed))
+    device->retries_ = 0;
+  if (++device->retries_ > 5) {
+    // The device no longer answers at all (seen with a wired Xbox 360 pad: every read fails at
+    // once, reading again never helps, unplugging fixes it). Do the unplugging in software: power
+    // the root port off and on. This also drops every other device on the port (a hub and what is
+    // behind it) for a moment.
+    if (now - this->reset_window_start_ > 300000) {
+      this->reset_window_start_ = now;
+      this->port_resets_ = 0;
+    }
+    if (this->port_resets_ < 5) {
+      this->port_resets_++;
+      device->retries_ = 0;
+      ESP_LOGW(TAG, "%s: interface %u keeps failing (status %u); resetting the USB port (%u/5 in 5 min)",
+               device->device_name_.c_str(), number, code, this->port_resets_);
+      usb_host_lib_set_root_port_power(false);
+      this->set_timeout("port_power", 500, []() { usb_host_lib_set_root_port_power(true); });
+    } else {
+      this->gave_up_ = true;
+      ESP_LOGW(TAG, "%s: interface %u keeps failing (status %u); stopped until a device is plugged in again",
+               device->device_name_.c_str(), number, code);
+    }
+    return;
+  }
+  ESP_LOGW(TAG, "%s: interface %u read failed (status %u); reading again", device->device_name_.c_str(), number,
+           code);
+  usb_host_endpoint_halt(device->dev_->handle, ep);
+  usb_host_endpoint_flush(device->dev_->handle, ep);
+  usb_host_endpoint_clear(device->dev_->handle, ep);
+  this->set_timeout(20, [this, serial, index, number, ep, mps, generation]() {
+    USBHIDDevice *again = this->find_device_(serial);
+    if (again != nullptr && generation == again->generation_.load(std::memory_order_acquire))
+      again->read_(index, number, ep, mps, generation);
+  });
+}
+
+void USBHIDClient::dump_config() {
+  usb_host::USBClient::dump_config();
+  ESP_LOGCONFIG(TAG, "  Num Lock at start: %s", YESNO((this->leds_ & hid::LED_NUM_LOCK) != 0));
+}
+
+USBHIDDevice *USBHIDClient::find_device_(uint32_t serial) const {
+  for (auto *device : this->hid_devices_) {
+    if (device->serial_ == serial)
+      return device;
+  }
+  return nullptr;
+}
+
 void USBHIDClient::loop() {
   Report *report;
   while ((report = this->reports_.pop()) != nullptr) {
-    if (report->interface < this->interfaces_.size())
-      this->report_(report->interface, report->data, report->length);
+    // A report of a device let go meanwhile finds none
+    USBHIDDevice *device = this->find_device_(report->serial);
+    if (device != nullptr && report->interface < device->interfaces_.size())
+      device->report_(report->interface, report->data, report->length);
     this->report_pool_.release(report);
   }
   usb_host::USBClient::loop();
 }
 
-// -- Connection ----------------------------------------------------------------------------
+// A HID interface's output reports go over the control pipe (SET_REPORT): its interrupt OUT gets no pipe
+// (and holds no host channel) unless a pad driver talks to the device over it (hid/gamepad.h), or the
+// Thrustmaster wheel setup (thrustmaster_()). Vendor pad interfaces (Xbox, MCE) keep theirs.
+uint32_t USBHIDClient::skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                                          const usb_intf_desc_t *alt) const {
+  if (alt->bInterfaceClass != USB_CLASS_HID)
+    return 0;
+  if ((desc->idVendor == 0x044F && desc->idProduct == 0xB65D) ||
+      hid::has_gamepad_driver(hid::HIDBus::USB, desc->idVendor, desc->idProduct))
+    return 0;
+  uint32_t skip = 0;
+  usb_host::for_each_alt_endpoint(config, alt, [&skip](const usb_ep_desc_t *ep) {
+    if ((ep->bEndpointAddress & 0x80) == 0 &&
+        (ep->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) == USB_BM_ATTRIBUTES_XFER_INT)
+      skip |= usb_host::endpoint_bit(ep);
+  });
+  return skip;
+}
 
-void USBHIDClient::on_connected() {
-  this->generation_.fetch_add(1, std::memory_order_acq_rel);
-  this->interfaces_.clear();
-  if (!this->find_interfaces_()) {
-    ESP_LOGW(TAG, "No usable HID interface on this device");
-    this->disconnect();
+USBHIDDevice *USBHIDClient::find_device(uint16_t vid, uint16_t pid) const {
+  for (auto *device : this->hid_devices_) {
+    const usb_device_desc_t *desc = device->device_desc();
+    if (desc != nullptr && desc->idVendor == vid && desc->idProduct == pid)
+      return device;
+  }
+  return nullptr;
+}
+
+void USBHIDClient::on_device_connected(usb_host::UsbDevice &dev) {
+  auto *device = new USBHIDDevice(this, &dev, this->next_serial_++);  // NOLINT: freed in free_device_context
+  dev.context = device;
+  this->hid_devices_.push_back(device);
+  if (!device->start_()) {
+    ESP_LOGW(TAG, "Device %d: no usable HID interface", dev.addr);
+    this->close_device(dev);  // stop_() and free_device_context() follow
     return;
   }
+}
+
+void USBHIDClient::on_device_disconnected(usb_host::UsbDevice &dev) {
+  auto *device = static_cast<USBHIDDevice *>(dev.context);
+  if (device == nullptr)
+    return;
+  device->stop_();
+  this->hid_devices_.erase(std::remove(this->hid_devices_.begin(), this->hid_devices_.end(), device),
+                           this->hid_devices_.end());
+  this->devices_cb_.call();
+  this->publish_name_();
+}
+
+void USBHIDClient::free_device_context(usb_host::UsbDevice &dev) {
+  delete static_cast<USBHIDDevice *>(dev.context);  // NOLINT
+  dev.context = nullptr;
+}
+
+void USBHIDClient::publish_name_() {
+#ifdef USE_TEXT_SENSOR
+  // The device connected last that is ready; "" when none is
+  if (this->device_name_sensor_ == nullptr)
+    return;
+  for (auto it = this->hid_devices_.rbegin(); it != this->hid_devices_.rend(); ++it) {
+    if ((*it)->ready_) {
+      this->device_name_sensor_->publish_state((*it)->device_name_);
+      return;
+    }
+  }
+  this->device_name_sensor_->publish_state("");
+#endif
+}
+
+uint8_t USBHIDClient::get_device_kinds() const {
+  uint8_t kinds = 0;
+  for (const auto *device : this->hid_devices_)
+    kinds |= device->get_device_kinds();
+  return kinds;
+}
+
+void USBHIDClient::list_devices(std::vector<hid::InputDevice> &out) const {
+  for (const auto *device : this->hid_devices_) {
+    if (!device->device_key_.empty())
+      out.push_back({device->device_key_, device->device_name_, true, device->get_device_kinds()});
+  }
+}
+
+void USBHIDClient::set_device_layout(const std::string &key, const hid::KeyboardLayout *layout) {
+  for (auto *device : this->hid_devices_) {
+    if (device->device_key_ == key)
+      device->device_layout_ = layout;
+  }
+}
+
+hid::HIDInput *USBHIDClient::device_input(const std::string &key) {
+  for (auto *device : this->hid_devices_) {
+    if (device->device_key_ == key)
+      return device;
+  }
+  return nullptr;
+}
+
+void USBHIDClient::rumble(uint8_t strong, uint8_t weak, uint32_t duration_ms) {
+  for (auto *device : this->hid_devices_)
+    device->rumble(strong, weak, duration_ms);
+}
+
+void USBHIDClient::set_player_led(uint8_t player) {
+  for (auto *device : this->hid_devices_)
+    device->set_player_led(player);
+}
+
+void USBHIDClient::set_light_bar(uint8_t red, uint8_t green, uint8_t blue) {
+  for (auto *device : this->hid_devices_)
+    device->set_light_bar(red, green, blue);
+}
+
+// The input's lock LEDs (set_num_lock from the configuration): every keyboard shows them.
+void USBHIDClient::write_leds_(uint8_t leds) {
+  for (auto *device : this->hid_devices_) {
+    device->leds_ = leds;
+    device->write_leds_(leds);
+  }
+}
+
+// =============================================================================================
+// USBHIDDevice: one connected device
+// =============================================================================================
+
+USBHIDDevice::USBHIDDevice(USBHIDClient *client, usb_host::UsbDevice *dev, uint32_t serial)
+    : client_(client), dev_(dev), serial_(serial) {
+  // What it types with, its log name and the lock LEDs as the input has them
+  this->layout_ = client->layout_;
+  this->log_name_ = client->log_name_;
+  this->leds_ = client->leds_;
+  // Its keys, text, pointer and controls are the input's (the client is what everything listens to)
+  this->add_on_key_event_callback(
+      [client](uint16_t page, uint16_t usage, bool pressed) { client->key_cb_.call(page, usage, pressed); });
+  this->add_on_text_callback([client](const std::string &text) { client->text_cb_.call(text); });
+  this->add_on_pointer_callback([client](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
+    client->pointer_cb_.call(dx, dy, wheel, pan, buttons);
+  });
+  this->add_on_control_callback(
+      [client](uint16_t page, uint16_t usage, int32_t value) { client->control_cb_.call(page, usage, value); });
+  this->add_on_key_callback([client](uint8_t key) { client->send_key_(key); });
+}
+
+Component *USBHIDDevice::hid_component() { return this->client_; }
+
+bool USBHIDDevice::control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
+                                    const usb_host::transfer_cb_t &callback, const std::vector<uint8_t> &data,
+                                    int32_t w_length) {
+  return this->client_->control_transfer(*this->dev_, type, request, value, index, callback, data, w_length);
+}
+
+bool USBHIDDevice::start_() {
+  this->generation_.fetch_add(1, std::memory_order_acq_rel);
+  this->interfaces_.clear();
+  if (!this->find_interfaces_())
+    return false;
   for (auto &intf : this->interfaces_) {
-    if (!this->claim_interface(intf.number, 0)) {
+    if (!this->client_->claim_interface(*this->dev_, intf.number, 0)) {
       ESP_LOGE(TAG, "Claiming interface %u failed", intf.number);
       intf.in_ep = 0;
     }
   }
+  // Which device it is, for a layout of its own (hid::InputDevice)
+  usb_host::UsbDeviceInfo info{};
+  if (this->client_->get_device_info(*this->dev_, info)) {
+    char key[16];
+    snprintf(key, sizeof(key), "usb:%04x:%04x", info.vendor_id, info.product_id);
+    this->device_key_ = key;
+    if (info.serial_number[0] != '\0')
+      this->device_key_ += std::string(":") + info.serial_number;
+    this->device_name_ = info.product[0] != '\0' ? info.product : std::string("USB ") + (key + 4);
+    // bcdDevice: the device's release, unless its driver reads its firmware.
+    char release[8];
+    snprintf(release, sizeof(release), "%X.%02X", info.bcd_device >> 8, info.bcd_device & 0xFF);
+    this->set_firmware(release);
+  }
   this->attach_pad_();
   this->fetch_descriptor_(0);
+  return true;
+}
+
+void USBHIDDevice::stop_() {
+  this->generation_.fetch_add(1, std::memory_order_acq_rel);
+  this->ready_ = false;
+  // A read is always in flight on each IN endpoint, and the interface cannot be released
+  // (nor the device closed, nor the transfer buffers freed) while it is.
+  for (auto &intf : this->interfaces_) {
+    if (intf.in_ep == 0)
+      continue;
+    usb_host_endpoint_halt(this->dev_->handle, intf.in_ep);
+    usb_host_endpoint_flush(this->dev_->handle, intf.in_ep);
+    this->client_->release_interface(*this->dev_, intf.number);
+  }
+  this->interfaces_.clear();
+  this->gamepad_detach_();
+  this->release_all_hid();
 }
 
 // The gamepad driver of the device, and the interface it talks to: the vendor pad interface,
 // else the first HID interface that is not a boot keyboard or mouse.
-void USBHIDClient::attach_pad_() {
+void USBHIDDevice::attach_pad_() {
   this->pad_index_ = 0;
   bool found = false;
   for (size_t i = 0; i < this->interfaces_.size() && !found; i++) {
@@ -143,7 +354,7 @@ void USBHIDClient::attach_pad_() {
       found = true;
     }
   }
-  const usb_device_desc_t *dev = this->get_device_desc_();
+  const usb_device_desc_t *dev = this->dev_->desc;
   if (dev == nullptr)
     return;
   switch (this->interfaces_[this->pad_index_].vendor) {
@@ -161,9 +372,13 @@ void USBHIDClient::attach_pad_() {
       this->gamepad_attach_(hid::HIDBus::USB,
                             std::make_unique<XboxOneDriver>(this, dev->idVendor, dev->idProduct, dev->bcdDevice));
       // The audio interface off: some pads (PowerA) only report the guide button then.
-      const usb_config_desc_t *cfg = this->get_config_desc_();
-      if (cfg != nullptr && cfg->bNumInterfaces > 1)
-        this->set_interface(1, 0, [](const usb_host::TransferStatus &) {});
+      const usb_config_desc_t *cfg = this->dev_->config;
+      if (cfg != nullptr && cfg->bNumInterfaces > 1) {
+        static constexpr uint8_t REQ_TYPE = usb_host::USB_DIR_OUT | usb_host::USB_TYPE_STANDARD |
+                                            usb_host::USB_RECIP_INTERFACE;
+        static constexpr uint8_t B_REQUEST_SET_INTERFACE = 11;
+        this->control_transfer(REQ_TYPE, B_REQUEST_SET_INTERFACE, 0, 1, [](const usb_host::TransferStatus &) {});
+      }
       break;
     }
     default:
@@ -172,30 +387,7 @@ void USBHIDClient::attach_pad_() {
   }
 }
 
-void USBHIDClient::on_disconnected() {
-  this->generation_.fetch_add(1, std::memory_order_acq_rel);
-  // A read is always in flight on each IN endpoint, and the interface cannot be released
-  // (nor the device closed, nor the transfer buffers freed) while it is.
-  for (auto &intf : this->interfaces_) {
-    if (intf.in_ep == 0)
-      continue;
-    usb_host_endpoint_halt(this->device_handle_, intf.in_ep);
-    usb_host_endpoint_flush(this->device_handle_, intf.in_ep);
-    this->release_interface(intf.number);
-  }
-  this->interfaces_.clear();
-  this->gamepad_detach_();
-  this->release_all_hid();
-#ifdef USE_TEXT_SENSOR
-  if (this->device_name_sensor_ != nullptr)
-    this->device_name_sensor_->publish_state("");
-#endif
-  usb_host::USBClient::on_disconnected();
-}
-
-uint8_t USBHIDClient::get_device_kinds() const {
-  if (!this->is_connected())
-    return 0;
+uint8_t USBHIDDevice::get_device_kinds() const {
   uint8_t kinds = 0;
   for (const auto &intf : this->interfaces_) {
     if (intf.vendor == VENDOR_MCE) {
@@ -209,20 +401,21 @@ uint8_t USBHIDClient::get_device_kinds() const {
   return kinds;
 }
 
-bool USBHIDClient::find_interfaces_() {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
-  const usb_device_desc_t *dev = this->get_device_desc_();
+bool USBHIDDevice::find_interfaces_() {
+  const usb_config_desc_t *cfg = this->dev_->config;
+  const usb_device_desc_t *dev = this->dev_->desc;
   if (cfg == nullptr || dev == nullptr)
     return false;
   const uint8_t mce = MCEReceiverDriver::model(dev->idVendor, dev->idProduct);
   Interface *current = nullptr;
+  uint32_t skipped = 0;  // the current interface's endpoints its claim opens no pipe for
   int offset = 0;
   const auto *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
   while ((desc = usb_parse_next_descriptor(desc, cfg->wTotalLength, &offset)) != nullptr) {
     if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
       const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(desc);
       current = nullptr;
-      if (intf->bAlternateSetting != 0 || !this->interface_routed_(intf->bInterfaceNumber) ||
+      if (intf->bAlternateSetting != 0 || !this->dev_->interface_routed(intf->bInterfaceNumber) ||
           this->interfaces_.size() >= MAX_INTERFACES)
         continue;
       Vendor vendor = VENDOR_NONE;
@@ -253,6 +446,7 @@ bool USBHIDClient::find_interfaces_() {
       entry.vendor = vendor;
       this->interfaces_.push_back(std::move(entry));
       current = &this->interfaces_.back();
+      skipped = this->client_->skipped_endpoints_(dev, cfg, intf);
       continue;
     }
     if (current == nullptr)
@@ -285,7 +479,7 @@ bool USBHIDClient::find_interfaces_() {
         current->in_ep = ep->bEndpointAddress;
         current->in_mps = USB_EP_DESC_GET_MPS(ep);
       }
-    } else if (current->out_ep == 0) {
+    } else if (current->out_ep == 0 && (skipped & usb_host::endpoint_bit(ep)) == 0) {
       current->out_ep = ep->bEndpointAddress;
     }
   }
@@ -296,11 +490,12 @@ bool USBHIDClient::find_interfaces_() {
 
 struct DescriptorRequest {
   USBHIDClient *client;
+  uint32_t serial;
   size_t index;
   uint32_t generation;
 };
 
-void USBHIDClient::fetch_descriptor_(size_t index) {
+void USBHIDDevice::fetch_descriptor_(size_t index) {
   while (index < this->interfaces_.size() &&
          (this->interfaces_[index].vendor != VENDOR_NONE || this->interfaces_[index].descriptor_length == 0 ||
           this->interfaces_[index].in_ep == 0))
@@ -310,9 +505,9 @@ void USBHIDClient::fetch_descriptor_(size_t index) {
     return;
   }
   const Interface &intf = this->interfaces_[index];
-  // A control read of the whole descriptor, which can be larger than the client's transfer
+  // A control read of the whole descriptor, which can be larger than the device's transfer
   // buffers: its own transfer, sized for it and whole packets of the control endpoint.
-  const uint16_t mps0 = this->get_device_desc_()->bMaxPacketSize0;
+  const uint16_t mps0 = this->dev_->desc->bMaxPacketSize0;
   const size_t data = (intf.descriptor_length + mps0 - 1) / mps0 * mps0;
   usb_transfer_t *xfer = nullptr;
   if (usb_host_transfer_alloc(usb_host::SETUP_PACKET_SIZE + data, 0, &xfer) != ESP_OK) {
@@ -327,9 +522,11 @@ void USBHIDClient::fetch_descriptor_(size_t index) {
   setup->wIndex = intf.number;
   setup->wLength = intf.descriptor_length;
   xfer->num_bytes = static_cast<int>(usb_host::SETUP_PACKET_SIZE + data);
-  xfer->device_handle = this->device_handle_;
+  xfer->device_handle = this->dev_->handle;
   xfer->bEndpointAddress = 0;
-  xfer->context = new DescriptorRequest{this, index, this->generation_.load(std::memory_order_acquire)};
+  // By the device's serial, not a pointer: the device may be gone when it completes
+  xfer->context =
+      new DescriptorRequest{this->client_, this->serial_, index, this->generation_.load(std::memory_order_acquire)};
   // USB task.
   xfer->callback = [](usb_transfer_t *t) {
     auto *req = static_cast<DescriptorRequest *>(t->context);
@@ -339,15 +536,17 @@ void USBHIDClient::fetch_descriptor_(size_t index) {
       copy.assign(t->data_buffer + usb_host::SETUP_PACKET_SIZE, t->data_buffer + t->actual_num_bytes);
     usb_host_transfer_free(t);
     USBHIDClient *client = req->client;
+    const uint32_t serial = req->serial;
     const size_t index = req->index;
     const uint32_t generation = req->generation;
     delete req;
-    client->defer([client, index, generation, copy = std::move(copy)]() {
-      if (generation == client->generation_.load(std::memory_order_acquire))
-        client->descriptor_done_(index, copy.data(), copy.size());
+    client->defer([client, serial, index, generation, copy = std::move(copy)]() {
+      USBHIDDevice *device = client->find_device_(serial);
+      if (device != nullptr && generation == device->generation_.load(std::memory_order_acquire))
+        device->descriptor_done_(index, copy.data(), copy.size());
     });
   };
-  if (usb_host_transfer_submit_control(this->handle_, xfer) != ESP_OK) {
+  if (usb_host_transfer_submit_control(this->client_->handle_, xfer) != ESP_OK) {
     delete static_cast<DescriptorRequest *>(xfer->context);
     usb_host_transfer_free(xfer);
     ESP_LOGE(TAG, "Report descriptor request of interface %u not submitted", intf.number);
@@ -355,11 +554,21 @@ void USBHIDClient::fetch_descriptor_(size_t index) {
   }
 }
 
-void USBHIDClient::descriptor_done_(size_t index, const uint8_t *data, size_t length) {
+void USBHIDDevice::descriptor_done_(size_t index, const uint8_t *data, size_t length) {
   Interface &intf = this->interfaces_[index];
   if (length == 0) {
     ESP_LOGW(TAG, "Interface %u: no report descriptor", intf.number);
   } else {
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
+    // The raw descriptor, once per connect: output / feature reports the parser does not list (stack, no heap)
+    for (size_t pos = 0; pos < length; pos += 32) {
+      char hex[32 * 3 + 1];
+      size_t n = 0;
+      for (size_t i = pos; i < length && i < pos + 32; i++)
+        n += snprintf(hex + n, sizeof(hex) - n, "%02X ", data[i]);
+      ESP_LOGD(TAG, "Interface %u report descriptor [%u]: %s", intf.number, static_cast<unsigned>(pos), hex);
+    }
+#endif
     intf.map.reset(hid::HIDReportMap::parse_report_map_data(data, length));
     if (intf.map == nullptr) {
       ESP_LOGW(TAG, "Interface %u: report descriptor (%u bytes) not understood", intf.number,
@@ -372,62 +581,66 @@ void USBHIDClient::descriptor_done_(size_t index, const uint8_t *data, size_t le
   this->fetch_descriptor_(index + 1);
 }
 
-void USBHIDClient::start_reading_() {
+void USBHIDDevice::start_reading_() {
   const uint32_t generation = this->generation_.load(std::memory_order_acquire);
   for (size_t i = 0; i < this->interfaces_.size(); i++) {
     const Interface &intf = this->interfaces_[i];
     if (intf.in_ep != 0)
       this->read_(static_cast<uint8_t>(i), intf.number, intf.in_ep, intf.in_mps, generation);
   }
-  ESP_LOGI(TAG, "HID device ready (%u interfaces)", static_cast<unsigned>(this->interfaces_.size()));
-  this->write_leds_(this->leds_);
-  this->report_connected_();
-  // What the device is (get_device_kinds()) is known from here on.
-  this->devices_cb_.call();
-#ifdef USE_TEXT_SENSOR
-  if (this->device_name_sensor_ != nullptr) {
-    usb_host::UsbDeviceInfo info;
-    if (this->get_device_info(info))
-      this->device_name_sensor_->publish_state(info.product);
+  ESP_LOGI(TAG, "HID device ready: %s (%u interfaces)", this->device_name_.c_str(),
+           static_cast<unsigned>(this->interfaces_.size()));
+  this->ready_ = true;
+  // A fresh start for the read retries; after giving up, plugging in again also gives the port
+  // resets back (martijnbuts)
+  this->retries_ = 0;
+  if (this->client_->gave_up_) {
+    this->client_->gave_up_ = false;
+    this->client_->port_resets_ = 0;
   }
-#endif
+  this->write_leds_(this->leds_);
+  // What the device is (get_device_kinds()) is known from here on.
+  this->client_->devices_cb_.call();
+  this->client_->publish_name_();
   this->gamepad_start_();
   this->thrustmaster_();
 }
 
 // USB task (and the main loop for the first read). Takes copies rather than reading
-// interfaces_, which the main loop clears on disconnect.
-void USBHIDClient::read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation) {
-  const bool submitted = this->transfer_in(
-      ep,
+// interfaces_, which the main loop clears when the device goes. The device's memory stays until
+// its transfers are back (USBClient::reap_devices_), so `this` is valid in the completion.
+void USBHIDDevice::read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation) {
+  const bool submitted = this->client_->transfer_in(
+      *this->dev_, ep,
       [this, index, number, ep, mps, generation](const usb_host::TransferStatus &status) {
         if (generation != this->generation_.load(std::memory_order_acquire))
           return;
         if (!status.success) {
           // Unplugged or cancelled on purpose: stop. Any other error (a glitch on the cable, a
-          // babble or a timeout) used to stop the pad for good; now the endpoint is cleared and
+          // babble or a timeout) used to stop the device for good; now the endpoint is cleared and
           // reading starts again (martijnbuts, 19-10-2026).
           if (status.error_code == USB_TRANSFER_STATUS_CANCELED || status.error_code == USB_TRANSFER_STATUS_NO_DEVICE) {
             ESP_LOGW(TAG, "Interface %u stopped (status %u)", number, status.error_code);
             return;
           }
-          const uint16_t code = status.error_code;
-          this->defer([this, index, number, ep, mps, generation, code]() {
-            this->restart_read_(index, number, ep, mps, generation, code);
-          });
+          this->client_->schedule_restart_read_(this->serial_, index, number, ep, mps, generation,
+                                                static_cast<uint16_t>(status.error_code));
           return;
         }
+        this->read_ok_.store(true, std::memory_order_relaxed);
         if (status.data_len > 0) {
-          this->rx_count_.fetch_add(1, std::memory_order_relaxed);
-          Report *report = this->report_pool_.allocate();
+          USBHIDClient *client = this->client_;
+          client->rx_count_.fetch_add(1, std::memory_order_relaxed);
+          USBHIDClient::Report *report = client->report_pool_.allocate();
           if (report == nullptr)
-            this->drop_count_.fetch_add(1, std::memory_order_relaxed);
+            client->drop_count_.fetch_add(1, std::memory_order_relaxed);
           if (report != nullptr) {
+            report->serial = this->serial_;
             report->interface = index;
-            report->length = static_cast<uint8_t>(std::min(status.data_len, REPORT_MAX));
+            report->length = static_cast<uint8_t>(std::min(status.data_len, USBHIDClient::REPORT_MAX));
             memcpy(report->data, status.data, report->length);
-            this->reports_.push(report);
-            this->enable_loop_soon_any_context();
+            client->reports_.push(report);
+            client->enable_loop_soon_any_context();
           }
         }
         this->read_(index, number, ep, mps, generation);
@@ -437,48 +650,13 @@ void USBHIDClient::read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps
     ESP_LOGE(TAG, "Read on interface %u not submitted", number);
 }
 
-// Main loop: clear the endpoint after a failed read and read again, at most 20 times in 10 s
-void USBHIDClient::restart_read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation,
-                                 uint16_t code) {
-  if (generation != this->generation_.load(std::memory_order_acquire) || this->device_handle_ == nullptr)
-    return;
-  const uint32_t now = millis();
-  if (now - this->retry_window_start_ > 10000) {
-    this->retry_window_start_ = now;
-    this->retries_ = 0;
-  }
-  if (++this->retries_ > 20) {
-    // The device no longer answers at all (seen with a wired Xbox 360 pad: every read fails at
-    // once, unplugging fixes it). Do the unplugging in software: power the root port off and on,
-    // so the device is enumerated again. At most once a minute.
-    if (this->last_port_reset_ == 0 || now - this->last_port_reset_ > 60000) {
-      this->last_port_reset_ = now;
-      ESP_LOGW(TAG, "Interface %u keeps failing (status %u); resetting the USB port", number, code);
-      usb_host_lib_set_root_port_power(false);
-      this->set_timeout("port_power", 500, []() { usb_host_lib_set_root_port_power(true); });
-    } else {
-      ESP_LOGW(TAG, "Interface %u keeps failing (status %u); stopped until the device is plugged in again",
-               number, code);
-    }
-    return;
-  }
-  ESP_LOGW(TAG, "Interface %u read failed (status %u); reading again", number, code);
-  usb_host_endpoint_halt(this->device_handle_, ep);
-  usb_host_endpoint_flush(this->device_handle_, ep);
-  usb_host_endpoint_clear(this->device_handle_, ep);
-  this->set_timeout(20, [this, index, number, ep, mps, generation]() {
-    if (generation == this->generation_.load(std::memory_order_acquire))
-      this->read_(index, number, ep, mps, generation);
-  });
-}
-
 // -- Reports (main loop) -------------------------------------------------------------------
 
-void USBHIDClient::report_(size_t index, const uint8_t *data, size_t length) {
+void USBHIDDevice::report_(size_t index, const uint8_t *data, size_t length) {
   Interface &intf = this->interfaces_[index];
 #ifdef USB_HID_ENABLE_RAW
-  if (this->raw_driver_ != nullptr)
-    this->raw_driver_->process_report(data, length);
+  if (this->client_->raw_driver_ != nullptr)
+    this->client_->raw_driver_->process_report(data, length);
 #endif
   // The device's driver, for its vendor interface or a HID one that is not a boot keyboard or
   // mouse (whose first byte is no report ID).
@@ -501,14 +679,14 @@ void USBHIDClient::report_(size_t index, const uint8_t *data, size_t length) {
 
 // -- Gamepad driver transport --------------------------------------------------------------
 
-bool USBHIDClient::send_output_report(const uint8_t *data, size_t len) {
+bool USBHIDDevice::send_output_report(const uint8_t *data, size_t len) {
   if (this->pad_index_ >= this->interfaces_.size() || this->interfaces_[this->pad_index_].out_ep == 0)
     return false;
-  return this->transfer_out(this->interfaces_[this->pad_index_].out_ep, [](const usb_host::TransferStatus &) {},
-                            data, static_cast<uint16_t>(len));
+  return this->client_->transfer_out(*this->dev_, this->interfaces_[this->pad_index_].out_ep,
+                                     [](const usb_host::TransferStatus &) {}, data, static_cast<uint16_t>(len));
 }
 
-bool USBHIDClient::set_report(hid::HIDReportKind kind, const uint8_t *data, size_t len) {
+bool USBHIDDevice::set_report(hid::HIDReportKind kind, const uint8_t *data, size_t len) {
   if (this->pad_index_ >= this->interfaces_.size() || len == 0)
     return false;
   const Interface &intf = this->interfaces_[this->pad_index_];
@@ -519,25 +697,28 @@ bool USBHIDClient::set_report(hid::HIDReportKind kind, const uint8_t *data, size
 }
 
 // The answer goes to the driver from the main loop; len 0 when the request failed.
-bool USBHIDClient::request_feature_report(uint8_t id, uint16_t len) {
-  const usb_device_desc_t *dev = this->get_device_desc_();
+bool USBHIDDevice::request_feature_report(uint8_t id, uint16_t len) {
+  const usb_device_desc_t *dev = this->dev_->desc;
   if (this->pad_index_ >= this->interfaces_.size() || dev == nullptr || len == 0)
     return false;
   // A control read takes whole packets of the control endpoint.
   const uint16_t mps0 = dev->bMaxPacketSize0;
   std::vector<uint8_t> buffer((len + mps0 - 1) / mps0 * mps0);
   const uint32_t generation = this->generation_.load(std::memory_order_acquire);
+  USBHIDClient *client = this->client_;
+  const uint32_t serial = this->serial_;
   const bool submitted = this->control_transfer(
       HID_REQ_TYPE_DEV_TO_HOST, HID_REQ_GET_REPORT,
       static_cast<uint16_t>(static_cast<uint8_t>(hid::HIDReportKind::FEATURE) << 8 | id),
       this->interfaces_[this->pad_index_].number,
-      [this, id, generation](const usb_host::TransferStatus &status) {
+      [client, serial, id, generation](const usb_host::TransferStatus &status) {
         std::vector<uint8_t> copy;
         if (status.success)
           copy.assign(status.data, status.data + status.data_len);
-        this->defer([this, id, generation, copy = std::move(copy)]() {
-          if (generation == this->generation_.load(std::memory_order_acquire))
-            this->gamepad_feature_(id, copy.data(), copy.size());
+        client->defer([client, serial, id, generation, copy = std::move(copy)]() {
+          USBHIDDevice *device = client->find_device_(serial);
+          if (device != nullptr && generation == device->generation_.load(std::memory_order_acquire))
+            device->gamepad_feature_(id, copy.data(), copy.size());
         });
       },
       buffer, len);
@@ -548,8 +729,8 @@ bool USBHIDClient::request_feature_report(uint8_t id, uint16_t len) {
 
 // Thrustmaster wheels (T150, T300, T500) come up as a generic "FFB wheel" (044F:B65D) and
 // switch to their own mode on request, then enumerate again (Linux hid-thrustmaster.c).
-void USBHIDClient::thrustmaster_() {
-  const usb_device_desc_t *dev = this->get_device_desc_();
+void USBHIDDevice::thrustmaster_() {
+  const usb_device_desc_t *dev = this->dev_->desc;
   if (dev == nullptr || dev->idVendor != 0x044F || dev->idProduct != 0xB65D)
     return;
   static const uint8_t SETUP0[] = {0x42, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -566,16 +747,19 @@ void USBHIDClient::thrustmaster_() {
   const uint16_t mps0 = dev->bMaxPacketSize0;
   std::vector<uint8_t> buffer((16 + mps0 - 1) / mps0 * mps0);
   const uint32_t generation = this->generation_.load(std::memory_order_acquire);
+  USBHIDClient *client = this->client_;
+  const uint32_t serial = this->serial_;
   this->control_transfer(
       0xC1, 73, 0, 0,
-      [this, generation](const usb_host::TransferStatus &status) {
+      [client, serial, generation](const usb_host::TransferStatus &status) {
         uint16_t model = 0;
         bool known = status.success && status.data_len >= 8 &&
                      (status.data[0] == 0x49 || status.data[0] == 0x47) && status.data[1] == 0x00;
         if (known)
           model = static_cast<uint16_t>(status.data[6] | (status.data[7] << 8));
-        this->defer([this, generation, known, model]() {
-          if (generation != this->generation_.load(std::memory_order_acquire))
+        client->defer([client, serial, generation, known, model]() {
+          USBHIDDevice *device = client->find_device_(serial);
+          if (device == nullptr || generation != device->generation_.load(std::memory_order_acquire))
             return;
           static constexpr struct {
             uint16_t model, mode;
@@ -585,7 +769,7 @@ void USBHIDClient::thrustmaster_() {
             if (known && w.model == model) {
               ESP_LOGI(TAG, "Thrustmaster wheel model 0x%04X: switching it to its own mode", model);
               // The wheel goes away before it answers; whatever comes back is fine.
-              this->control_transfer(0x41, 83, w.mode, 0, [](const usb_host::TransferStatus &) {});
+              device->control_transfer(0x41, 83, w.mode, 0, [](const usb_host::TransferStatus &) {});
               return;
             }
           }
@@ -597,7 +781,7 @@ void USBHIDClient::thrustmaster_() {
 
 // -- Lock LEDs -----------------------------------------------------------------------------
 
-void USBHIDClient::write_leds_(uint8_t leds) {
+void USBHIDDevice::write_leds_(uint8_t leds) {
   for (auto &intf : this->interfaces_) {
     if (intf.map == nullptr)
       continue;
@@ -607,9 +791,9 @@ void USBHIDClient::write_leds_(uint8_t leds) {
       continue;
     if (intf.map->uses_report_ids())
       payload.insert(payload.begin(), report_id);
-    this->control_transfer(
-        HID_REQ_TYPE_HOST_TO_DEV, HID_REQ_SET_REPORT, static_cast<uint16_t>(HID_REPORT_TYPE_OUTPUT << 8 | report_id),
-        intf.number, [](const usb_host::TransferStatus &) {}, payload);
+    this->control_transfer(HID_REQ_TYPE_HOST_TO_DEV, HID_REQ_SET_REPORT,
+                           static_cast<uint16_t>(HID_REPORT_TYPE_OUTPUT << 8 | report_id), intf.number,
+                           [](const usb_host::TransferStatus &) {}, payload);
     return;
   }
 }
