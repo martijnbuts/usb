@@ -4,26 +4,24 @@ A USB mouse and keyboard as input for an ESPHome LVGL screen on the ESP32-P4, on
 ESPHome-dev** with ESP-IDF 6.1.
 
 Tested on the **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B** (Type-A USB 2.0 OTG High-Speed port),
-ESPHome 2026.11.0-dev, ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit `caa9733` (13 Oct 2026).
+ESPHome 2026.11.0-dev (23 Oct 2026), ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit
+[`d050f83`](https://github.com/p1ngb4ck/esphome/commit/d050f83b1aec8890d504b9a9e79b8add460fc91a)
+(23 Oct 2026).
 
-> **Update 19 Oct 2026, evening:** the example now pins the fork at
-> [`c550f96`](https://github.com/p1ngb4ck/esphome/commit/c550f96eb2a208f5f4d6d20e72fc15ef93192712)
-> (19 Oct 2026, 20:32) and takes `usb_hid` from this repo (a copy of the fork's with a fix, see
-> [Troubleshooting](#a-device-stops-after-one-read-error-interface-0-stopped-status-1)). This
-> combination is **compiled and running on the Waveshare 7B** with a wired Xbox 360 pad
-> (`lvgl_usb_hid` included); mice and keyboards were not retested with it. `c550f96` differs from
-> `80faf2e` below only in `usb_host` logging and task stacks.
+> **Update 23 Oct 2026:** the example now pins the fork at `d050f83` and `usb_hid` here is a copy
+> of that commit's (with the [read-retry change](#a-device-stops-after-one-read-error-interface-0-stopped-status-1),
+> now per device). The big change in the fork since `c550f96` (19 Oct): **one `usb_hid` entry
+> serves every HID device that is plugged in** (a keyboard, a mouse, pads, a receiver), each as a
+> device of its own; before, an entry took exactly one device. So the example has one `usb_hid`
+> and one `lvgl_usb_hid` entry instead of two. A pad's state, driver and details now live on the
+> device (`device_input(key)`), not on the entry; keys, text, pointer and controls still reach the
+> entry, so `lvgl_usb_hid` and automations are unchanged. Also new: host channels budgeted per
+> controller, per-driver blacklists, and the raw report descriptor in the DEBUG log.
+> This combination is **compiled and running on the Waveshare 7B** (see the top of the
+> [example](example/usb_input.yaml) for what was checked).
 >
-> **Fork commit:** the example pinned the fork at
-> [`80faf2e`](https://github.com/p1ngb4ck/esphome/commit/80faf2e5523b007878248d108959afaf5f48a5de)
-> (19 Oct 2026). Since the tested `caa9733` it adds the gamepad layer, touch screens, MCE IR
-> receivers, Logitech receiver handling, hub fixes (every hub port powered before a device is
-> reset, a retry at address 0 when a device does not answer at its new address) and a reworked
-> `usb_audio`. The example passes `esphome config` with this commit on ESPHome-dev of
-> 19 Oct 2026, and `lvgl_usb_hid` uses only fork API that did not change, but it has **not been
-> compiled or tested on the hardware yet**; use `caa97336f20007c905b2f3ce89bee87a8f4595f4` if you
-> want the tested one. (`4e93938` of 17 Oct, briefly pinned here, carried the fork's own
-> low-speed-behind-a-hub mechanisms, which the fork dropped again on 18 Oct.)
+> Earlier pins: `c550f96` (19 Oct, gamepad layer, ran with a wired Xbox 360 pad), `80faf2e`
+> (19 Oct), `caa9733` (13 Oct, the first tested one).
 
 - [What you get](#what-you-get)
 - [Supported USB devices](#supported-usb-devices)
@@ -284,12 +282,16 @@ release between two LVGL reads is not lost.
 
 ### Several devices
 
-- Each `usb_hid` entry handles one USB device. Without `vid`/`pid` an entry takes the next HID
-  device that is plugged in; with them it only takes that device. The example has two entries:
-  enough for a separate keyboard and mouse on a hub. A combo receiver needs only one.
-- Each `lvgl_usb_hid` entry creates its own LVGL pointer and/or keypad for one `usb_hid` entry.
-  An entry with `pointer: true` whose device turns out to be a keyboard simply never shows its
-  cursor, so the defaults (both on) are fine for "whatever gets plugged in".
+- Since fork `d050f83` **one `usb_hid` entry handles every HID device** that is plugged in, each
+  as a device of its own (its own interfaces, report descriptors, keys held and pad). Everything
+  they send arrives at the entry, so one entry is enough for a keyboard, a mouse and a pad on a
+  hub. `vid`/`pid` on an entry limit it to that device; a second entry is only needed to keep
+  devices apart (for example a remote whose keys should go to automations only).
+- `device_name` shows the device that connected last. `list_devices()` lists them all, and
+  `device_input(key)` gives one device's own input (a pad's sticks, driver, battery).
+- Each `lvgl_usb_hid` entry creates one LVGL pointer and/or keypad for one `usb_hid` entry, so all
+  mice share one cursor and all keyboards one focus. A device that turns out to be a keyboard
+  never shows the cursor, so the defaults (both on) are fine for "whatever gets plugged in".
 
 ### Why not the fork's own LVGL integration
 
@@ -318,7 +320,7 @@ packages:
   usb: !include usb_input.yaml
 ```
 
-The example pins the fork to a commit (`c550f96`, see the note at the top), because its
+The example pins the fork to a commit (`d050f83`, see the note at the top), because its
 `testing_dev` branch changes daily. Upstream
 ESPHome-dev (checked 2026-10-16) has `usb_host`, `usb_uart` and `usb_cdc_acm`, but no
 `usb_hid` yet.
@@ -327,7 +329,7 @@ Options per entry:
 
 ```yaml
 lvgl_usb_hid:
-  - hid_id: usb_input_1   # a usb_hid id (any HIDInput)
+  - hid_id: usb_input     # a usb_hid id (any HIDInput)
     pointer: true         # mouse as LVGL pointer with a cursor (default true)
     keyboard: true        # keyboard as LVGL keypad (default true)
     hide_after: 10s       # hide the cursor after this long without motion (default 10s, 0s = never)
@@ -337,13 +339,13 @@ Useful `usb_hid` options (from the fork):
 
 ```yaml
 usb_hid:
-  - id: usb_input_1
+  - id: usb_input
     layout: nl            # keyboard layout, XKB name; or a base layout with keys of your own
     num_lock: true        # Num Lock on at start
     vid: 0x046D           # optional: only this device (vendor/product id, see the log)
     pid: 0xC52B
-    device_name:          # text sensor with the name of the connected device
-      name: "USB device 1"
+    device_name:          # text sensor with the name of the device that connected last
+      name: "USB device"
 ```
 
 ### Automations
@@ -352,7 +354,7 @@ Keyboard shortcuts, media keys and buttons work without LVGL:
 
 ```yaml
 usb_hid:
-  - id: usb_input_1
+  - id: usb_input
     on_key:
       - key: F1
         then:
@@ -607,7 +609,7 @@ is the supported route today.
 ## Troubleshooting
 
 - **Nothing happens:** check the log. With the logger at `DEBUG`, `usb_hid` logs every key and
-  button as `[usb_input_1] ENTER pressed`. `No usable HID interface on this device` means the
+  button as `[usb_input] ENTER pressed`. `No usable HID interface on this device` means the
   device is neither HID nor one of the pads and receivers with a driver of their own;
   `VID:PID: no driver` means no entry claimed it.
 - **Mouse works, keyboard focus is invisible:** your LVGL theme or styles must draw a focus state
@@ -619,9 +621,23 @@ is the supported route today.
   gamepads also `full_speed_only: true` (see [USB versions, speeds and hubs](#usb-versions-speeds-and-hubs)).
   Try the device directly in the port to rule out the hub, and use a powered hub for several
   devices.
-- **Two devices end up in the "wrong" entry:** pin each `usb_hid` entry to a device with
-  `vid`/`pid`; `usb_host` logs them as `046D:C52B …` when a device connects.
+- **Keys of one device should not reach LVGL:** give it an entry of its own with `vid`/`pid`
+  (and no `lvgl_usb_hid` for that entry); `usb_host` logs devices as `046D:C52B …` when they
+  connect.
 - **A device stops responding and the log says `Interface 0 stopped (status 1)`:** see below.
+- **The screen restarts within seconds after an update and rolls back** (log after the rollback:
+  `OTA rollback detected`): on 23 Oct 2026 this was not USB but ESPHome-dev's move to esp_hosted
+  3.0.10 (the Wi-Fi link to the C6 on the Waveshare board, esphome PR #21394), with the C6 still on
+  older firmware. Taking `esp32_hosted` from the ESPHome commit before it fixed it:
+
+  ```yaml
+  external_components:
+    - source:
+        type: git
+        url: https://github.com/esphome/esphome
+        ref: ce83a625c10a9d648f66378fd98984c971b4fa0b
+      components: [esp32_hosted]
+  ```
 
 ### A device stops after one read error (`Interface 0 stopped (status 1)`)
 
@@ -634,7 +650,7 @@ Seen on 19 Oct 2026 with a wired Xbox 360 pad (`045E:028E`) on the Waveshare 7B:
 
 Status 1 is `USB_TRANSFER_STATUS_ERROR`: an interrupt-IN transfer failed at the USB level (no
 valid answer from the device: a CRC error, a timeout, a glitch on the line). The fork's
-`usb_hid` (also in its newest commit `c550f96`) then stops reading that interface for good.
+`usb_hid` (still in `d050f83` of 23 Oct 2026) then stops reading that interface for good.
 
 What we found by retrying: after the first error, **every** read failed at once (20 retries in
 under a second, each with status 1, endpoint halted, flushed and cleared in between). Only
@@ -647,17 +663,19 @@ Type-A port gives exactly this kind of transaction error. With the board on the 
 instead, the same pad ran without a single error, rumble included (confirmed 19 Oct 2026). Power
 the board from a charger or power bank of at least 5 V / 2 A when a pad is plugged in.
 
-This repo has a copy of the fork's `usb_hid` (from `c550f96`) with these changes
+This repo has a copy of the fork's `usb_hid` (from `d050f83`) with these changes
 ([`docs/patches/usb_hid-read-retry.patch`](docs/patches/usb_hid-read-retry.patch)):
 
 - On any read error other than "cancelled" or "no device" it halts, flushes and clears the
-  endpoint and reads again after 20 ms (log: `Interface 0 read failed (status 1); reading again`).
-- After 20 failures within 10 seconds it **power-cycles the root port** for 500 ms
-  (`usb_host_lib_set_root_port_power`), so the device is enumerated again as if it had been
-  replugged (log: `keeps failing (status 1); resetting the USB port`), at most once a minute.
-  This compiles with fork `c550f96` on ESP-IDF 6.1; whether the replug brings the pad back has
-  **not been confirmed on the hardware yet**. It also briefly drops every other device on the
-  port (a hub and what is behind it).
+  endpoint and reads again after 20 ms (log: `Controller: interface 0 read failed (status 1);
+  reading again`). This is per device: one failing pad does not touch the keyboard next to it.
+- When a device fails more than 5 times in a row without a good read in between, it
+  **power-cycles the root port** for 500 ms (`usb_host_lib_set_root_port_power`), so the device
+  is enumerated again as if it had been replugged (log: `keeps failing (status 1); resetting the
+  USB port (1/5 in 5 min)`). At most 5 resets in 5 minutes; after that it stops until a device is
+  plugged in again. A reset briefly drops every device on the port (a hub and what is behind it).
+  Whether the replug brings a stuck pad back has **not been confirmed on the hardware yet** (with
+  enough power the error did not come back).
 - Every 5 seconds while reports arrive, an INFO line `N reports in 5 s, M dropped (queue full)`,
   and `No reports for 5 s` once when they stop: handy to see when a device goes quiet.
 
@@ -669,7 +687,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/p1ngb4ck/esphome
-      ref: c550f96eb2a208f5f4d6d20e72fc15ef93192712
+      ref: d050f83b1aec8890d504b9a9e79b8add460fc91a
     components: [usb_host, hid]
   - source:
       type: git
@@ -678,14 +696,15 @@ external_components:
 ```
 
 The copy must match the fork commit of `usb_host` and `hid` (it uses their internals); with
-another fork commit, apply the patch to that commit's `usb_hid` instead.
+another fork commit, apply the patch to that commit's `usb_hid` instead
+(`git apply docs/patches/usb_hid-read-retry.patch` from the fork's root).
 
 ## Limitations
 
 - Text into LVGL text areas is printable ASCII only; characters like `é` or `€` reach `on_text`
   but are not typed into the text area.
 - Only the left mouse button is used by LVGL.
-- One cursor per `lvgl_usb_hid` entry; two mice give two cursors.
+- One cursor per `lvgl_usb_hid` entry: all mice on that `usb_hid` entry move the same cursor.
 - Gamepads do not drive LVGL yet. USB touch screens and tablets move the cursor like a touchpad
   (relative), they do not tap where they are touched.
 - The MCE remote's Back key is a consumer key (`AC_BACK`): it reaches automations, not LVGL.
@@ -694,7 +713,7 @@ another fork commit, apply the patch to that commit's `usb_hid` instead.
 ## Credits
 
 - `usb_host`, `usb_hid`, `hid` and the cursor approach: [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome).
-  `components/usb_hid` here is a copy of the fork's `usb_hid` (commit `c550f96`) with the read-retry
+  `components/usb_hid` here is a copy of the fork's `usb_hid` (commit `d050f83`) with the read-retry
   change; it keeps ESPHome's licensing (C++ under GPL-3.0, Python under MIT).
   The HID report parser there comes from [fsievers22/esphome-ble-remote](https://github.com/fsievers22/esphome-ble-remote).
 - USB ports: Waveshare [ESP32-P4-WIFI6-Touch-LCD-7B wiki](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B) and [schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B/ESP32-P4-WIFI6-Touch-LCD-7B.pdf).

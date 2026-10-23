@@ -1,17 +1,18 @@
-# ─── USB mouse and keyboard for an ESP32-P4 LVGL screen ───────────────────────────────────────
+# ─── USB mouse, keyboard and gamepad for an ESP32-P4 LVGL screen ───────────────────────────────
 # Use as a package next to a device config that already has lvgl:
 #   packages:
 #     usb: !include usb_input.yaml
 #
 # Tested on the Waveshare ESP32-P4-WIFI6-Touch-LCD-7B: devices go in the Type-A port
-# (USB 2.0 OTG High-Speed). Mouse and keyboard at the same time: a combo receiver (one dongle)
-# or a small USB hub (then also full_speed_only, see below).
+# (USB 2.0 OTG High-Speed). Several devices at the same time: a combo receiver (one dongle) or a
+# small USB hub (then also full_speed_only, see below).
 #
 # usb_host and hid come from the p1ngb4ck fork (upstream ESPHome has no HID support yet), pinned
-# to a commit because testing_dev changes daily: c550f96 (19 Oct 2026), compiled and running on
-# the Waveshare 7B. usb_hid comes from this repo: the fork's copy of that commit with a fix for
-# devices that stop after a read error (see the README, Troubleshooting).
-# lvgl_usb_hid (this repo) connects them to upstream ESPHome's lvgl.
+# to a commit because testing_dev changes daily: d050f83 (23 Oct 2026), compiled and running on
+# the Waveshare 7B with ESPHome 2026.11.0-dev and ESP-IDF 6.1. usb_hid comes from this repo: the
+# fork's copy of that commit with a fix for devices that stop after a read error (see the README,
+# Troubleshooting). lvgl_usb_hid (this repo) connects them to upstream ESPHome's lvgl.
+# Since d050f83 one usb_hid entry serves every HID device that is plugged in.
 #
 # Keyboard shortcuts for automations go in usb_hid with on_key, for example:
 #   on_key:
@@ -22,7 +23,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/p1ngb4ck/esphome
-      ref: c550f96eb2a208f5f4d6d20e72fc15ef93192712
+      ref: d050f83b1aec8890d504b9a9e79b8add460fc91a
     components: [usb_host, hid]
   - source:
       type: git
@@ -30,7 +31,7 @@ external_components:
     components: [lvgl_usb_hid, usb_hid]
 
 usb_host:
-  # A hub may sit in between (keyboard and mouse both in one port)
+  # A hub may sit in between (keyboard, mouse and pad all in one port)
   enable_hubs: true
   # Keyboards and mice are low/full-speed devices. Behind a USB 2.0 hub they need split
   # transactions, which espressif/usb (the USB host library ESP-IDF 6.1 uses) does not have:
@@ -38,23 +39,16 @@ usb_host:
   # Not needed for a combo receiver or a device directly in the port.
   # full_speed_only: true
 
-# Two HID devices at once: each usb_hid entry takes the next keyboard or mouse.
+# One entry for every HID device (keyboard, mouse, pad, receiver)
 usb_hid:
-  - id: usb_input_1
+  - id: usb_input
     layout: us
     device_name:
-      name: "USB device 1"
-      icon: mdi:usb
-      entity_category: diagnostic
-  - id: usb_input_2
-    layout: us
-    device_name:
-      name: "USB device 2"
+      name: "USB device"
       icon: mdi:usb
       entity_category: diagnostic
 
+# One cursor and one keyboard focus for all of them
 lvgl_usb_hid:
-  - hid_id: usb_input_1
-    hide_after: 10s
-  - hid_id: usb_input_2
+  - hid_id: usb_input
     hide_after: 10s

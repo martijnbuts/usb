@@ -9,18 +9,13 @@ diff -ru a/esphome/components/usb_hid/usb_hid.cpp b/esphome/components/usb_hid/u
  #include "esphome/core/log.h"
  
  #include <algorithm>
-@@ -25,6 +26,7 @@
- static constexpr uint8_t XBOXONE_PROTOCOL = 0xD0;
- 
- void USBHIDClient::setup() {
+@@ -39,6 +40,77 @@
+     this->add_vendor_match(m.vid, m.pid, (m.flags & MCEReceiverDriver::INTERFACE_2) ? 0xFF : -1);
+   });
+   usb_host::USBClient::setup();
 +  this->set_interval("hid_stats", 5000, [this]() { this->log_stats_(); });
-   this->add_class_match(USB_CLASS_HID);
-   this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRED);
-   this->add_class_match(0xFF, XBOX_SUBCLASS, XBOX_PROTOCOL_WIRELESS);
-@@ -74,6 +76,19 @@
-   ESP_LOGCONFIG(TAG, "  Num Lock at start: %s", YESNO((this->leds_ & hid::LED_NUM_LOCK) != 0));
- }
- 
++}
++
 +// Diagnostics (martijnbuts, 19-10-2026): reports received and dropped (report pool full), every
 +// 5 s while reports arrive, and once when they stop
 +void USBHIDClient::log_stats_() {
@@ -34,99 +29,141 @@ diff -ru a/esphome/components/usb_hid/usb_hid.cpp b/esphome/components/usb_hid/u
 +  this->stats_active_ = rx != 0;
 +}
 +
- void USBHIDClient::loop() {
-   Report *report;
-   while ((report = this->reports_.pop()) != nullptr) {
-@@ -382,11 +397,24 @@
++// USB task: a failed read is handled on the main loop
++void USBHIDClient::schedule_restart_read_(uint32_t serial, uint8_t index, uint8_t number, uint8_t ep, uint16_t mps,
++                                          uint32_t generation, uint16_t code) {
++  this->defer([this, serial, index, number, ep, mps, generation, code]() {
++    this->restart_read_(serial, index, number, ep, mps, generation, code);
++  });
++}
++
++// Main loop (martijnbuts, 19-10-2026; per device since 23-10-2026): clear the endpoint after a failed
++// read and read again. A device that keeps failing (more than 5 failures without a good read in
++// between) gets the root port power-cycled, so it is enumerated again as if replugged: at most 5
++// times in 5 minutes, then reading stops until a device is plugged in again. Looked up by serial:
++// the device may be gone by now.
++void USBHIDClient::restart_read_(uint32_t serial, uint8_t index, uint8_t number, uint8_t ep, uint16_t mps,
++                                 uint32_t generation, uint16_t code) {
++  USBHIDDevice *device = this->find_device_(serial);
++  if (device == nullptr || generation != device->generation_.load(std::memory_order_acquire) ||
++      device->dev_->handle == nullptr)
++    return;
++  const uint32_t now = millis();
++  if (device->read_ok_.exchange(false, std::memory_order_relaxed))
++    device->retries_ = 0;
++  if (++device->retries_ > 5) {
++    // The device no longer answers at all (seen with a wired Xbox 360 pad: every read fails at
++    // once, reading again never helps, unplugging fixes it). Do the unplugging in software: power
++    // the root port off and on. This also drops every other device on the port (a hub and what is
++    // behind it) for a moment.
++    if (now - this->reset_window_start_ > 300000) {
++      this->reset_window_start_ = now;
++      this->port_resets_ = 0;
++    }
++    if (this->port_resets_ < 5) {
++      this->port_resets_++;
++      device->retries_ = 0;
++      ESP_LOGW(TAG, "%s: interface %u keeps failing (status %u); resetting the USB port (%u/5 in 5 min)",
++               device->device_name_.c_str(), number, code, this->port_resets_);
++      usb_host_lib_set_root_port_power(false);
++      this->set_timeout("port_power", 500, []() { usb_host_lib_set_root_port_power(true); });
++    } else {
++      this->gave_up_ = true;
++      ESP_LOGW(TAG, "%s: interface %u keeps failing (status %u); stopped until a device is plugged in again",
++               device->device_name_.c_str(), number, code);
++    }
++    return;
++  }
++  ESP_LOGW(TAG, "%s: interface %u read failed (status %u); reading again", device->device_name_.c_str(), number,
++           code);
++  usb_host_endpoint_halt(device->dev_->handle, ep);
++  usb_host_endpoint_flush(device->dev_->handle, ep);
++  usb_host_endpoint_clear(device->dev_->handle, ep);
++  this->set_timeout(20, [this, serial, index, number, ep, mps, generation]() {
++    USBHIDDevice *again = this->find_device_(serial);
++    if (again != nullptr && generation == again->generation_.load(std::memory_order_acquire))
++      again->read_(index, number, ep, mps, generation);
++  });
+ }
+ 
+ void USBHIDClient::dump_config() {
+@@ -519,6 +591,13 @@
+   ESP_LOGI(TAG, "HID device ready: %s (%u interfaces)", this->device_name_.c_str(),
+            static_cast<unsigned>(this->interfaces_.size()));
+   this->ready_ = true;
++  // A fresh start for the read retries; after giving up, plugging in again also gives the port
++  // resets back (martijnbuts)
++  this->retries_ = 0;
++  if (this->client_->gave_up_) {
++    this->client_->gave_up_ = false;
++    this->client_->port_resets_ = 0;
++  }
+   this->write_leds_(this->leds_);
+   // What the device is (get_device_kinds()) is known from here on.
+   this->client_->devices_cb_.call();
+@@ -537,12 +616,24 @@
          if (generation != this->generation_.load(std::memory_order_acquire))
            return;
          if (!status.success) {
 -          ESP_LOGW(TAG, "Interface %u stopped (status %u)", number, status.error_code);
 +          // Unplugged or cancelled on purpose: stop. Any other error (a glitch on the cable, a
-+          // babble or a timeout) used to stop the pad for good; now the endpoint is cleared and
++          // babble or a timeout) used to stop the device for good; now the endpoint is cleared and
 +          // reading starts again (martijnbuts, 19-10-2026).
 +          if (status.error_code == USB_TRANSFER_STATUS_CANCELED || status.error_code == USB_TRANSFER_STATUS_NO_DEVICE) {
 +            ESP_LOGW(TAG, "Interface %u stopped (status %u)", number, status.error_code);
 +            return;
 +          }
-+          const uint16_t code = status.error_code;
-+          this->defer([this, index, number, ep, mps, generation, code]() {
-+            this->restart_read_(index, number, ep, mps, generation, code);
-+          });
++          this->client_->schedule_restart_read_(this->serial_, index, number, ep, mps, generation,
++                                                static_cast<uint16_t>(status.error_code));
            return;
          }
++        this->read_ok_.store(true, std::memory_order_relaxed);
          if (status.data_len > 0) {
-+          this->rx_count_.fetch_add(1, std::memory_order_relaxed);
-           Report *report = this->report_pool_.allocate();
+           USBHIDClient *client = this->client_;
++          client->rx_count_.fetch_add(1, std::memory_order_relaxed);
+           USBHIDClient::Report *report = client->report_pool_.allocate();
 +          if (report == nullptr)
-+            this->drop_count_.fetch_add(1, std::memory_order_relaxed);
++            client->drop_count_.fetch_add(1, std::memory_order_relaxed);
            if (report != nullptr) {
+             report->serial = this->serial_;
              report->interface = index;
-             report->length = static_cast<uint8_t>(std::min(status.data_len, REPORT_MAX));
-@@ -402,6 +430,41 @@
-     ESP_LOGE(TAG, "Read on interface %u not submitted", number);
- }
- 
-+// Main loop: clear the endpoint after a failed read and read again, at most 20 times in 10 s
-+void USBHIDClient::restart_read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation,
-+                                 uint16_t code) {
-+  if (generation != this->generation_.load(std::memory_order_acquire) || this->device_handle_ == nullptr)
-+    return;
-+  const uint32_t now = millis();
-+  if (now - this->retry_window_start_ > 10000) {
-+    this->retry_window_start_ = now;
-+    this->retries_ = 0;
-+  }
-+  if (++this->retries_ > 20) {
-+    // The device no longer answers at all (seen with a wired Xbox 360 pad: every read fails at
-+    // once, unplugging fixes it). Do the unplugging in software: power the root port off and on,
-+    // so the device is enumerated again. At most once a minute.
-+    if (this->last_port_reset_ == 0 || now - this->last_port_reset_ > 60000) {
-+      this->last_port_reset_ = now;
-+      ESP_LOGW(TAG, "Interface %u keeps failing (status %u); resetting the USB port", number, code);
-+      usb_host_lib_set_root_port_power(false);
-+      this->set_timeout("port_power", 500, []() { usb_host_lib_set_root_port_power(true); });
-+    } else {
-+      ESP_LOGW(TAG, "Interface %u keeps failing (status %u); stopped until the device is plugged in again",
-+               number, code);
-+    }
-+    return;
-+  }
-+  ESP_LOGW(TAG, "Interface %u read failed (status %u); reading again", number, code);
-+  usb_host_endpoint_halt(this->device_handle_, ep);
-+  usb_host_endpoint_flush(this->device_handle_, ep);
-+  usb_host_endpoint_clear(this->device_handle_, ep);
-+  this->set_timeout(20, [this, index, number, ep, mps, generation]() {
-+    if (generation == this->generation_.load(std::memory_order_acquire))
-+      this->read_(index, number, ep, mps, generation);
-+  });
-+}
-+
- // -- Reports (main loop) -------------------------------------------------------------------
- 
- void USBHIDClient::report_(size_t index, const uint8_t *data, size_t length) {
 diff -ru a/esphome/components/usb_hid/usb_hid.h b/esphome/components/usb_hid/usb_hid.h
 --- a/esphome/components/usb_hid/usb_hid.h
 +++ b/esphome/components/usb_hid/usb_hid.h
-@@ -96,6 +96,7 @@
-   void descriptor_done_(size_t index, const uint8_t *data, size_t length);
-   void start_reading_();
-   void read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation);
-+  void restart_read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation, uint16_t code);
-   void report_(size_t index, const uint8_t *data, size_t length);
-   void attach_pad_();
-   void thrustmaster_();
-@@ -107,6 +108,13 @@
+@@ -92,6 +92,9 @@
+   std::atomic<uint32_t> generation_{0};
+   size_t pad_index_{0};  // the interface the gamepad driver talks to
+   bool ready_{false};
++  // Read retries (martijnbuts): failed reads in a row, and whether one succeeded since (USB task)
++  uint8_t retries_{0};
++  std::atomic<bool> read_ok_{false};
+ };
+ 
+ // USB HID: any number of HID devices at once (a keyboard, the receiver of a wireless set, a headset's
+@@ -148,12 +151,26 @@
+   void write_leds_(uint8_t leds) override;
+   USBHIDDevice *find_device_(uint32_t serial) const;
+   void publish_name_();
++  // Read retries and statistics (martijnbuts, see usb_hid.cpp)
++  void schedule_restart_read_(uint32_t serial, uint8_t index, uint8_t number, uint8_t ep, uint16_t mps,
++                              uint32_t generation, uint16_t code);
++  void restart_read_(uint32_t serial, uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation,
++                     uint16_t code);
++  void log_stats_();
+ 
+   std::vector<USBHIDDevice *> hid_devices_{};
+   uint32_t next_serial_{1};
    LockFreeQueue<Report, QUEUE_SIZE> reports_{};
    EventPool<Report, QUEUE_SIZE - 1> report_pool_{};
    RawHIDDriver *raw_driver_{nullptr};
-+  uint32_t retry_window_start_{0};
-+  uint32_t last_port_reset_{0};
-+  void log_stats_();
++  // Root port resets: for every device on the port, so kept here (main loop)
++  uint32_t reset_window_start_{0};
++  uint8_t port_resets_{0};  // port resets since reset_window_start_
++  bool gave_up_{false};
++  // Reports received and dropped (queue full) since the last statistics line (USB task)
 +  std::atomic<uint32_t> rx_count_{0};
 +  std::atomic<uint32_t> drop_count_{0};
 +  bool stats_active_{false};
-+  uint8_t retries_{0};
-   size_t pad_index_{0};  // the interface the gamepad driver talks to
  #ifdef USE_TEXT_SENSOR
    text_sensor::TextSensor *device_name_sensor_{nullptr};
+ #endif
