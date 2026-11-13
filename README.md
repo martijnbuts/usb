@@ -8,6 +8,20 @@ ESPHome 2026.11.0-dev (23 Oct 2026), ESP-IDF 6.1.0, LVGL 9.6, with the fork at c
 [`d050f83`](https://github.com/p1ngb4ck/esphome/commit/d050f83b1aec8890d504b9a9e79b8add460fc91a)
 (23 Oct 2026).
 
+> **Update 13 Nov 2026 (not yet tested on the hardware):** the fork was reorganised. Its
+> `testing_dev` branch is gone; everything is now on [`dev`](https://github.com/p1ngb4ck/esphome/tree/dev),
+> built from one repository per topic ([esphome-usb-host](https://github.com/p1ngb4ck/esphome-usb-host),
+> [esphome-usb-drivers](https://github.com/p1ngb4ck/esphome-usb-drivers),
+> [esphome-hid](https://github.com/p1ngb4ck/esphome-hid),
+> [esphome-bluetooth](https://github.com/p1ngb4ck/esphome-bluetooth)). The example now pins `dev` at
+> [`9fb8947`](https://github.com/p1ngb4ck/esphome/commit/9fb894738eb7db8cc642f7e08aad1e957cbaea60)
+> (3 Nov 2026) and `usb_hid` here is a copy of that commit's with the read-retry change. New in this
+> repo: a failing device **behind a hub** no longer resets the whole USB port (that would also drop
+> the hub and a Bluetooth dongle on it), and a page on [USB Bluetooth dongles](#usb-bluetooth-dongles).
+> Checked so far: `esphome config` and code generation on ESPHome 2026.12.0-dev, and the fork's
+> patches apply to `espressif/usb` 1.4.1. **Not yet compiled or run on the Waveshare 7B**: the
+> combination below (`d050f83`) is the last one that ran there.
+>
 > **Update 23 Oct 2026:** the example now pins the fork at `d050f83` and `usb_hid` here is a copy
 > of that commit's (with the [read-retry change](#a-device-stops-after-one-read-error-interface-0-stopped-status-1),
 > now per device). The big change in the fork since `c550f96` (19 Oct): **one `usb_hid` entry
@@ -31,7 +45,8 @@ ESPHome 2026.11.0-dev (23 Oct 2026), ESP-IDF 6.1.0, LVGL 9.6, with the fork at c
 - [Gamepads](#gamepads)
 - [USB audio: ESPHome's or the fork's](#usb-audio-esphomes-or-the-forks)
 - [Webcams](#webcams)
-- [Other USB devices in the fork](#other-usb-devices-in-the-fork) (and [USB Ethernet](#usb-ethernet-not-supported))
+- [USB Bluetooth dongles](#usb-bluetooth-dongles)
+- [Other USB devices in the fork](#other-usb-devices-in-the-fork) (and [USB Ethernet](#usb-ethernet))
 - [Troubleshooting](#troubleshooting) (and [a device that stops after a read error](#a-device-stops-after-one-read-error-interface-0-stopped-status-1))
 - [Limitations](#limitations)
 
@@ -66,8 +81,9 @@ component turns it into screen input; "Automations" means `usb_hid` delivers it 
 | Barcode scanners in keyboard mode | ✅ as keyboard | ✅ `on_text` | They are keyboards; pick the layout the scanner is set to. |
 | USB sound cards, headsets, USB microphones | – | ✅ `microphone`, `speaker` | Through the fork's `usb_audio` in this setup. See [USB audio](#usb-audio-esphomes-or-the-forks). |
 | Webcams | ❌ | ❌ picture, ⚠️ microphone | See [Webcams](#webcams). |
-| USB Ethernet adapters, 4G modules in ECM/RNDIS mode | – | ❌ | Not supported. See [USB Ethernet](#usb-ethernet-not-supported). |
-| USB hub | – | – | Needs `enable_hubs: true`, and `full_speed_only: true` for keyboards and mice behind it: see [below](#usb-versions-speeds-and-hubs). |
+| USB Ethernet adapters (CDC-ECM / CDC-NCM) | – | ⚠️ | The fork has `usb_ethernet` since Nov 2026; untested here. See [USB Ethernet](#usb-ethernet). |
+| USB Bluetooth dongles | – | ⚠️ | Found and probed by the fork's `usb_bluetooth`; using Bluetooth devices through it needs the fork's Bluetooth components. See [USB Bluetooth dongles](#usb-bluetooth-dongles). |
+| USB hub | – | – | Needs `enable_hubs: true`, and `full_speed_only: true` for keyboards, mice and most Bluetooth dongles behind it: see [below](#usb-versions-speeds-and-hubs). |
 
 "✅" for gamepads, remotes, IR receivers and touch screens means the code path exists in the
 fork; this repo is only tested with mice and keyboards.
@@ -80,7 +96,7 @@ follows, not how fast it is: a "USB 2.0" keyboard is still a low-speed device.
 | Speed | Since | Typical devices |
 |---|---|---|
 | Low speed, 1.5 Mbit/s | USB 1.0 / 1.1 | most wired mice and keyboards, simple remotes |
-| Full speed, 12 Mbit/s | USB 1.1 | wireless receivers (Logitech Unifying and the like), gaming mice, gamepads, USB 1.1 hubs |
+| Full speed, 12 Mbit/s | USB 1.1 | wireless receivers (Logitech Unifying and the like), gaming mice, gamepads, most Bluetooth dongles, USB 1.1 hubs |
 | High speed, 480 Mbit/s | USB 2.0 | USB 2.0 hubs, webcams, USB sticks, card readers, sound cards |
 | SuperSpeed (5 Gbit/s and up) | USB 3.x | not in this port: USB 3 devices fall back to USB 2.0 speeds |
 
@@ -99,11 +115,13 @@ With ESP-IDF 6.1 the USB host library is not part of ESP-IDF itself but the `esp
 component; the fork uses version **1.4.1** of it, with its own patches. That library has no
 split transactions: a low- or full-speed device behind a high-speed hub is refused with
 `Connected device is LS, transaction translator (TT) is not supported` in the log. This is
-still the case in the newest release (1.6.0, October 2026), where Espressif lists it as a known
-limitation.
+still the case in the newest release (1.6.1, 13 Nov 2026; checked in its `hub.c`, `ext_hub.c` and
+docs), where Espressif lists it as a known limitation.
 
 So **a keyboard or mouse behind a USB 2.0 hub is not found by default**, while a high-speed
-device (a USB stick) behind the same hub is.
+device (a USB stick) behind the same hub is. The same goes for a **Bluetooth dongle**: nearly all
+of them (CSR, Broadcom, Realtek RTL8761) are full-speed devices. Only combined WiFi + Bluetooth
+adapters are usually high speed.
 
 The fix is `full_speed_only: true` in `usb_host` (from the fork). The high-speed controller then
 ignores the high-speed handshake, so the hub and everything behind it run at full or low speed:
@@ -115,7 +133,7 @@ setter that 1.6.0 expects, so the fork backports `fsls_only` into its patched 1.
 ```yaml
 usb_host:
   enable_hubs: true
-  full_speed_only: true   # keyboards and mice behind a hub (no split transactions in espressif/usb)
+  full_speed_only: true   # keyboards, mice and Bluetooth dongles behind a hub (no split transactions in espressif/usb)
 ```
 
 | Setup | Works | Notes |
@@ -128,6 +146,7 @@ usb_host:
 | keyboard with a built-in hub (extra USB ports) | ⚠️ | that hub is a USB 2.0 or 1.1 hub like any other: the two rows above apply |
 | USB 2.0 hub, only high-speed devices behind it | ✅ | without `full_speed_only` |
 | keyboard/mouse **and** a high-speed device (stick, webcam) on one hub | ⚠️ | only with `full_speed_only: true`; the high-speed device then runs at 12 Mbit/s |
+| keyboard/mouse **and** a Bluetooth dongle on one USB 2.0 hub | ✅ | with `full_speed_only: true`: all of them are full/low-speed devices, nothing is slowed down |
 | hub behind a hub | ✅ | `espressif/usb` allows several hub levels (`CONFIG_USB_HOST_HUB_MULTI_LEVEL`, on by default) |
 
 Good to know:
@@ -142,8 +161,18 @@ Good to know:
 - `full_speed_only` slows down every high-speed device on the port, not only those behind a hub:
   a USB stick drops from about 480 to 12 Mbit/s (in practice around 1 MB/s), a webcam to small
   MJPEG frames. Audio and HID do not notice.
+- Host channels for a hub with a keyboard, a mouse and a Bluetooth dongle: about 2 for the hub, 2–3
+  per keyboard or mouse and 4 for the dongle (its two audio endpoints are skipped), so they fit in
+  the 16.
+- The fork patches hub handling in its copy of `espressif/usb` 1.4.1 (requests of several ports of
+  one hub no longer collide, every port is powered before a device is reset, a low-speed device
+  that misses SET_ADDRESS is asked again). Espressif's own 1.6.1 fixes two hub crashes (unplugging
+  a hub during a control transfer, a leak when a device behind a hub is rejected); the fork's 1.4.1
+  copy does not have those two.
+- A device behind a hub that keeps failing is stopped on its own; the USB port is not reset (see
+  [Troubleshooting](#a-device-stops-after-one-read-error-interface-0-stopped-status-1)).
 - The hub rows above follow the `espressif/usb` source and docs and the fork's code; they have
-  not been tested with this repo yet.
+  **not been tested on the hardware with this repo yet**.
 
 ### The two USB controllers of the ESP32-P4
 
@@ -188,12 +217,12 @@ What that costs and needs:
 | Option | Default | What it does |
 |---|---|---|
 | `enable_hubs` | `false` | external hubs (`CONFIG_USB_HOST_HUBS_SUPPORTED`) |
-| `full_speed_only` | `false` | the high-speed controller as a full/low-speed host (ESP32-P4 only) |
+| `full_speed_only` | `false` | the high-speed controller as a full/low-speed host (ESP32-P4, ESP32-S31) |
 | `dual_host` / `controllers` | high-speed only | `both`, `high_speed` or `full_speed` (ESP32-P4 only) |
 | `fs_pins` | `"26_27"` | pin pair of the full-speed controller (ESP32-P4) |
 | `max_packet_size` | 512 on the P4, 64 elsewhere | size of each transfer buffer; 512 fits a high-speed bulk packet (USB sticks) |
 | `max_transfer_requests` | 16 | transfers each client (each `usb_hid`, `usb_audio`, …) can have in flight (1–32) |
-| `mode_switch` | – | devices that start in the wrong mode: `usb_modeswitch`-style bulk messages, a control request, or `hid2hci` for Bluetooth dongles in HID proxy mode |
+| `mode_switch` | – | devices that start in the wrong mode: `usb_modeswitch`-style bulk messages, a control request, or `hid2hci` for Bluetooth dongles in HID proxy mode. See the fork's [configuration reference](https://github.com/p1ngb4ck/esphome-usb-host/blob/main/CONFIGURATION.md) |
 
 The FIFO division of each controller (how much room received data, bulk and isochronous OUT get)
 is chosen per controller by the components that need it (`usb_audio` on a full-speed controller),
@@ -221,7 +250,7 @@ low-speed delay), the fork's
 
 | Part | From | Does |
 |---|---|---|
-| `usb_host` | [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) (`testing_dev`) | Espressif's USB host library (`espressif/usb` 1.4.1, patched), hub support, routes each plugged-in device to a client |
+| `usb_host` | [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome) (`dev`) | Espressif's USB host library (`espressif/usb` 1.4.1, patched), hub support, routes each plugged-in device to a client |
 | `usb_hid` | same fork | one client per USB device: finds its HID interfaces, fetches each report descriptor, reads the interrupt-IN reports. Also drives devices that are not plain HID: Xbox 360 and Xbox One/Series pads, MCE IR receivers, PlayStation/Switch/Steam pads that need an init |
 | `hid` | same fork | parses reports into keys and buttons, typed text (keyboard layout, Shift, AltGr, dead keys), mouse and touch motion, a common gamepad layout and other controls |
 | `lvgl_usb_hid` | this repo | turns that into LVGL input devices: a pointer with a cursor and a keypad with a focus group |
@@ -320,10 +349,14 @@ packages:
   usb: !include usb_input.yaml
 ```
 
-The example pins the fork to a commit (`d050f83`, see the note at the top), because its
-`testing_dev` branch changes daily. Upstream
-ESPHome-dev (checked 2026-10-16) has `usb_host`, `usb_uart` and `usb_cdc_acm`, but no
-`usb_hid` yet.
+The example pins the fork to a commit of its `dev` branch (`9fb8947`, see the note at the top), so
+a change in the fork cannot break your build. Upstream ESPHome-dev (checked 2026-11-13,
+2026.12.0-dev) has `usb_host`, `usb_uart`, `usb_cdc_acm` and `usb_audio`, but no `usb_hid`, no
+`usb_bluetooth` and no `full_speed_only`.
+
+To stay on the combination that ran on the Waveshare 7B, use the fork's commit
+`d050f83b1aec8890d504b9a9e79b8add460fc91a` together with this repo at commit `45a1190`
+(`ref:` on both sources). That fork commit is no longer on a branch, so GitHub may remove it one day.
 
 Options per entry:
 
@@ -567,6 +600,60 @@ video and audio interfaces, and the microphone is a normal USB audio (UAC) inter
 an ESPHome `microphone` (for example for a voice assistant) even without the picture. Nobody has
 reported this working in ESPHome yet; with `full_speed_only: true` the webcam runs at full speed.
 
+## USB Bluetooth dongles
+
+The ESP32-P4 has no radio. On the Waveshare 7B the ESP32-C6 gives it WiFi and Bluetooth LE
+(`esp32_hosted`); Bluetooth **Classic** (older keyboards, most gamepads, audio) is not there. A USB
+Bluetooth dongle can add it, through the fork's `usb_bluetooth`. Upstream ESPHome-dev has no such
+component (checked 13 Nov 2026).
+
+**Status: read from the fork's code and validated with `esphome config`; nothing of this has been
+compiled or run on the hardware yet.**
+
+### Three levels
+
+| Level | Config | What you get | On upstream ESPHome-dev |
+|---|---|---|---|
+| 1. Detect | `usb_bluetooth:` | The dongle is taken by its USB class (any vendor), reset, and its Bluetooth version, address and name are logged. Realtek dongles get their firmware. Nothing uses the radio. | Only `usb_host` and `usb_bluetooth` from the fork: validates and generates code here ([`example/usb_bluetooth.yaml`](example/usb_bluetooth.yaml)) |
+| 2. Bluetooth on the dongle | `bluedroid: true`, no `esp32_ble` | ESP-IDF's Bluedroid host runs on the dongle (Classic and LE on its radio) | Validates, but the components that use it (`bt_host`, `bt_hid`, `a2dp_source`) come from the fork and need more of it, see below |
+| 3. Split | `bluedroid: true` beside `esp32_ble` | LE on the C6, Classic on the dongle, one Bluedroid | Needs the fork's `esp32_ble` (it waits for the dongle and restarts Bluedroid when it is replugged) |
+
+### What level 2 and 3 need
+
+A Bluetooth keyboard as LVGL input would be `bt_hid` (Classic) or `ble_client_hid` (LE): both are
+`hid` inputs, so `lvgl_usb_hid` takes them with `hid_id:` exactly like a `usb_hid` entry. But the
+fork's Bluetooth host is not a set of loose components. `bt_host` (pairing, bonding, persistence)
+imports the fork's `storage`, and with pairing also its `ble_client`, `ble_client_hid` and
+`ble_broadcast`; these rely on hooks in the fork's `esp32_ble`, `ble_client` and `api`. Loaded as
+`external_components` they **replace ESPHome's own** `esp32_ble` and `ble_client`, which then stop
+following ESPHome-dev (the fork was last merged with it on 1 Nov 2026). Tried here on ESPHome
+2026.12.0-dev: `bt_host` alone fails to load (`No module named 'esphome.components.storage'`), and
+with `storage` added the next missing piece is `ble_broadcast`.
+
+So for now this repo covers level 1 only. Level 2 and 3 mean running a good part of the fork; if
+you want that, the fork's own `dev` branch as the ESPHome version is the more honest setup than
+upstream plus a long list of replaced components. See
+[esphome-bluetooth](https://github.com/p1ngb4ck/esphome-bluetooth#readme) and the `usb_bluetooth`
+part of the fork's [configuration reference](https://github.com/p1ngb4ck/esphome-usb-drivers/blob/main/CONFIGURATION.md).
+
+### Good to know
+
+- **Behind a USB 2.0 hub: `full_speed_only: true`.** Most dongles are full-speed devices and need
+  split transactions otherwise (see [Hubs](#hubs-where-mixing-speeds-goes-wrong)). Directly in the
+  Type-A port a dongle needs nothing special.
+- `usb_bluetooth` needs `max_packet_size` of 256 or more in `usb_host` (an HCI command is one
+  control transfer of up to 258 bytes). The ESP32-P4 default is 512, so leave it alone.
+- **Realtek** dongles (RTL8761BU and the like) start without firmware: put `rtl8761bu_fw.bin` (and
+  the `_config.bin` if the chip has one) from linux-firmware `rtl_bt/` next to the YAML and name
+  them with `firmware:` / `firmware_config:`. CSR and Broadcom dongles need none.
+- Dongles that start as something else (a "driver CD", or HID proxy mode on some Dell/Logitech/CSR
+  ones) are switched by `usb_host`'s `mode_switch`.
+- Bluedroid reads its controllers once, when it starts. At level 2 a dongle that is replugged, or
+  dropped by a USB port reset, is only used again after a restart of the screen. This is why the
+  read-retry change in this repo no longer resets the port for a device behind a hub.
+- The dongle draws little power, but a hub with a dongle, a keyboard and a pad adds up: power the
+  board from at least 5 V / 2 A (see [Troubleshooting](#a-device-stops-after-one-read-error-interface-0-stopped-status-1)).
+
 ## Other USB devices in the fork
 
 The same fork has more `usb_host` clients. They are independent of `lvgl_usb_hid` and **not
@@ -578,38 +665,29 @@ tested here**; listed so you know what exists:
 | `usb_audio` | USB sound cards / headsets: speaker, microphone, media player; see [USB audio](#usb-audio-esphomes-or-the-forks) |
 | `usb_uart` | USB–serial adapters (CH34x, CH934x, FTDI, CP210x, PL2303); also upstream |
 | `usb_cdc_acm` | CDC-ACM serial devices; also upstream |
-| `usb_bluetooth` | USB Bluetooth dongles as HCI controller |
+| `usb_bluetooth` | USB Bluetooth dongles as HCI controller, see [USB Bluetooth dongles](#usb-bluetooth-dongles) |
+| `usb_ethernet` | CDC-ECM / CDC-NCM network adapters, see [USB Ethernet](#usb-ethernet) |
+| `usb_cdrom` | USB optical drives (ISO 9660) |
 | `usb_uvc` | webcams (frames only, no camera platform), see [Webcams](#webcams) |
 
-### USB Ethernet: not supported
+### USB Ethernet
 
-Neither ESPHome-dev (checked 19 Oct 2026) nor the fork (`80faf2e`) can use a USB network
-adapter. ESPHome's `ethernet` component only knows RMII PHYs (LAN8720, IP101, …) and SPI chips
-(W5500, DM9051, CH390, ENC28J60, …), and the fork has no USB network client. No ESPHome component
-for it turned up elsewhere either.
+ESPHome-dev itself (checked 13 Nov 2026) cannot use a USB network adapter: its `ethernet`
+component only knows RMII PHYs (LAN8720, IP101, …) and SPI chips (W5500, DM9051, CH390, ENC28J60, …).
 
-In plain ESP-IDF it exists: Espressif's esp-iot-solution has a
-[USB ECM host driver](https://docs.espressif.com/projects/esp-iot-solution/en/latest/usb/usb_host/usb_ecm.html)
-(tested with CH397A, RTL8152B and NX7202D adapters and several 4G modules, also on the ESP32-P4)
-and a [USB RNDIS host driver](https://docs.espressif.com/projects/esp-iot-solution/en/latest/usb/usb_host/usb_rndis.html).
-Many cheap adapters (ASIX AX88179, RTL8153 in its default mode) do not speak ECM and would not
-work with these drivers.
-
-Bringing that into ESPHome would need a component of its own that:
-
-1. lives alongside the fork's `usb_host` (Espressif's driver registers its own USB host client,
-   the same problem as ESPHome-dev's `usb_audio`, see [USB audio](#usb-audio-esphomes-or-the-forks));
-2. presents the adapter as a network interface the way `wifi` and `ethernet` do, so the API, OTA
-   and logs run over it;
-3. accepts 12 Mbit/s when `full_speed_only` is on for a hub.
+The fork has a `usb_ethernet` component since November 2026: CDC-ECM and CDC-NCM adapters as a
+network interface beside WiFi and Ethernet. It needs the fork's `network` changes as well
+(`pr/network-usb-ethernet` in [esphome-network](https://github.com/p1ngb4ck/esphome-network)), so
+it is not a drop-in on upstream ESPHome, and it has **not been tried here**. Many cheap adapters
+(ASIX AX88179, RTL8153 in its default mode) do not speak ECM or NCM and would not work.
 
 For a wired network on an ESP32-P4 screen, an SPI Ethernet module (W5500, CH390, …) on free GPIOs
-is the supported route today.
+is the route ESPHome supports today.
 
 ## Troubleshooting
 
-- **Nothing happens:** check the log. With the logger at `DEBUG`, `usb_hid` logs every key and
-  button as `[usb_input] ENTER pressed`. `No usable HID interface on this device` means the
+- **Nothing happens:** check the log. With the logger at `VERBOSE` (`DEBUG` up to fork `d050f83`),
+  `usb_hid` logs every key and button as `[usb_input] ENTER pressed`. `No usable HID interface on this device` means the
   device is neither HID nor one of the pads and receivers with a driver of their own;
   `VID:PID: no driver` means no entry claimed it.
 - **Mouse works, keyboard focus is invisible:** your LVGL theme or styles must draw a focus state
@@ -620,7 +698,7 @@ is the supported route today.
 - **Device behind a hub not found:** set `enable_hubs: true`, and for keyboards, mice and
   gamepads also `full_speed_only: true` (see [USB versions, speeds and hubs](#usb-versions-speeds-and-hubs)).
   Try the device directly in the port to rule out the hub, and use a powered hub for several
-  devices.
+  devices. A Bluetooth dongle behind a USB 2.0 hub needs `full_speed_only: true` as well.
 - **Keys of one device should not reach LVGL:** give it an entry of its own with `vid`/`pid`
   (and no `lvgl_usb_hid` for that entry); `usb_host` logs devices as `046D:C52B …` when they
   connect.
@@ -646,7 +724,7 @@ Seen on 19 Oct 2026 with a wired Xbox 360 pad (`045E:028E`) on the Waveshare 7B:
 
 Status 1 is `USB_TRANSFER_STATUS_ERROR`: an interrupt-IN transfer failed at the USB level (no
 valid answer from the device: a CRC error, a timeout, a glitch on the line). The fork's
-`usb_hid` (still in `d050f83` of 23 Oct 2026) then stops reading that interface for good.
+`usb_hid` (still in `dev` at `9fb8947` of 3 Nov 2026) then stops reading that interface for good.
 
 What we found by retrying: after the first error, **every** read failed at once (20 retries in
 under a second, each with status 1, endpoint halted, flushed and cleared in between). Only
@@ -659,7 +737,7 @@ Type-A port gives exactly this kind of transaction error. With the board on the 
 instead, the same pad ran without a single error, rumble included (confirmed 19 Oct 2026). Power
 the board from a charger or power bank of at least 5 V / 2 A when a pad is plugged in.
 
-This repo has a copy of the fork's `usb_hid` (from `d050f83`) with these changes
+This repo has a copy of the fork's `usb_hid` (from `9fb8947`) with these changes
 ([`docs/patches/usb_hid-read-retry.patch`](docs/patches/usb_hid-read-retry.patch)):
 
 - On any read error other than "cancelled" or "no device" it halts, flushes and clears the
@@ -669,9 +747,12 @@ This repo has a copy of the fork's `usb_hid` (from `d050f83`) with these changes
   **power-cycles the root port** for 500 ms (`usb_host_lib_set_root_port_power`), so the device
   is enumerated again as if it had been replugged (log: `keeps failing (status 1); resetting the
   USB port (1/5 in 5 min)`). At most 5 resets in 5 minutes; after that it stops until a device is
-  plugged in again. A reset briefly drops every device on the port (a hub and what is behind it).
-  Whether the replug brings a stuck pad back has **not been confirmed on the hardware yet** (with
-  enough power the error did not come back).
+  plugged in again. Whether the replug brings a stuck pad back has **not been confirmed on the
+  hardware yet** (with enough power the error did not come back).
+- **Behind a hub the port is not reset** (since 13 Nov 2026): a reset would also drop the hub and
+  every other device on it, such as a Bluetooth dongle with its connections. Only the failing
+  device stops (log: `behind a hub, so the USB port is not reset. Stopped until it is plugged in
+  again`); unplug it and plug it in again.
 - Every 5 seconds while reports arrive, an INFO line `N reports in 5 s, M dropped (queue full)`,
   and `No reports for 5 s` once when they stop: handy to see when a device goes quiet.
 
@@ -683,7 +764,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/p1ngb4ck/esphome
-      ref: d050f83b1aec8890d504b9a9e79b8add460fc91a
+      ref: 9fb894738eb7db8cc642f7e08aad1e957cbaea60
     components: [usb_host, hid]
   - source:
       type: git
@@ -709,7 +790,7 @@ another fork commit, apply the patch to that commit's `usb_hid` instead
 ## Credits
 
 - `usb_host`, `usb_hid`, `hid` and the cursor approach: [p1ngb4ck/esphome](https://github.com/p1ngb4ck/esphome).
-  `components/usb_hid` here is a copy of the fork's `usb_hid` (commit `d050f83`) with the read-retry
+  `components/usb_hid` here is a copy of the fork's `usb_hid` (commit `9fb8947`) with the read-retry
   change; it keeps ESPHome's licensing (C++ under GPL-3.0, Python under MIT).
   The HID report parser there comes from [fsievers22/esphome-ble-remote](https://github.com/fsievers22/esphome-ble-remote).
 - USB ports: Waveshare [ESP32-P4-WIFI6-Touch-LCD-7B wiki](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B) and [schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-7B/ESP32-P4-WIFI6-Touch-LCD-7B.pdf).

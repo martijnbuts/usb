@@ -1,6 +1,7 @@
 #include "usb_hid.h"
 
-#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
+#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || \
+    defined(USE_ESP32_VARIANT_ESP32S31)
 
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -79,6 +80,17 @@ void USBHIDClient::restart_read_(uint32_t serial, uint8_t index, uint8_t number,
   if (device->read_ok_.exchange(false, std::memory_order_relaxed))
     device->retries_ = 0;
   if (++device->retries_ > 5) {
+    // Behind a hub the root port is not this device's alone: a power cycle would also drop the hub
+    // and everything else on it (the other keyboards, a Bluetooth dongle with its connections). Stop
+    // reading this device only; replugging it starts it again (martijnbuts, 13-11-2026).
+    usb_device_info_t info{};
+    if (usb_host_device_info(device->dev_->handle, &info) == ESP_OK && info.parent.dev_hdl != nullptr) {
+      device->retries_ = 0;
+      ESP_LOGW(TAG, "%s: interface %u keeps failing (status %u); behind a hub, so the USB port is not reset. "
+                    "Stopped until it is plugged in again",
+               device->device_name_.c_str(), number, code);
+      return;
+    }
     // The device no longer answers at all (seen with a wired Xbox 360 pad: every read fails at
     // once, reading again never helps, unplugging fixes it). Do the unplugging in software: power
     // the root port off and on. This also drops every other device on the port (a hub and what is
@@ -215,6 +227,23 @@ uint8_t USBHIDClient::get_device_kinds() const {
   return kinds;
 }
 
+uint8_t USBHIDClient::input_device_kinds() const {
+  uint8_t kinds = 0;
+  for (const auto *device : this->hid_devices_) {
+    if (!device->radio_)
+      kinds |= device->get_device_kinds();
+  }
+  return kinds;
+}
+
+bool USBHIDClient::is_radio(const std::string &key) const {
+  for (const auto *device : this->hid_devices_) {
+    if (device->device_key_ == key)
+      return device->radio_;
+  }
+  return false;
+}
+
 void USBHIDClient::list_devices(std::vector<hid::InputDevice> &out) const {
   for (const auto *device : this->hid_devices_) {
     if (!device->device_key_.empty())
@@ -271,8 +300,11 @@ USBHIDDevice::USBHIDDevice(USBHIDClient *client, usb_host::UsbDevice *dev, uint3
   this->log_name_ = client->log_name_;
   this->leds_ = client->leds_;
   // Its keys, text, pointer and controls are the input's (the client is what everything listens to)
-  this->add_on_key_event_callback(
-      [client](uint16_t page, uint16_t usage, bool pressed) { client->key_cb_.call(page, usage, pressed); });
+  this->add_on_key_event_callback([client, this](uint16_t page, uint16_t usage, bool pressed) {
+    client->key_source_ = this->key_source_;
+    client->key_source_label_ = this->key_source_label_;
+    client->key_cb_.call(page, usage, pressed);
+  });
   this->add_on_text_callback([client](const std::string &text) { client->text_cb_.call(text); });
   this->add_on_pointer_callback([client](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
     client->pointer_cb_.call(dx, dy, wheel, pan, buttons);
@@ -407,6 +439,7 @@ bool USBHIDDevice::find_interfaces_() {
   if (cfg == nullptr || dev == nullptr)
     return false;
   const uint8_t mce = MCEReceiverDriver::model(dev->idVendor, dev->idProduct);
+  this->radio_ = dev->bDeviceClass == USB_CLASS_WIRELESS_CONTROLLER;
   Interface *current = nullptr;
   uint32_t skipped = 0;  // the current interface's endpoints its claim opens no pipe for
   int offset = 0;
@@ -415,6 +448,8 @@ bool USBHIDDevice::find_interfaces_() {
     if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
       const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(desc);
       current = nullptr;
+      if (intf->bInterfaceClass == USB_CLASS_WIRELESS_CONTROLLER)
+        this->radio_ = true;
       if (intf->bAlternateSetting != 0 || !this->dev_->interface_routed(intf->bInterfaceNumber) ||
           this->interfaces_.size() >= MAX_INTERFACES)
         continue;

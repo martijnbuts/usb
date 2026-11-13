@@ -1,15 +1,15 @@
 diff -ru a/esphome/components/usb_hid/usb_hid.cpp b/esphome/components/usb_hid/usb_hid.cpp
 --- a/esphome/components/usb_hid/usb_hid.cpp
 +++ b/esphome/components/usb_hid/usb_hid.cpp
-@@ -2,6 +2,7 @@
- 
- #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
+@@ -3,6 +3,7 @@
+ #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || \
+     defined(USE_ESP32_VARIANT_ESP32S31)
  
 +#include "esphome/core/hal.h"
  #include "esphome/core/log.h"
  
  #include <algorithm>
-@@ -39,6 +40,77 @@
+@@ -40,6 +41,88 @@
      this->add_vendor_match(m.vid, m.pid, (m.flags & MCEReceiverDriver::INTERFACE_2) ? 0xFF : -1);
    });
    usb_host::USBClient::setup();
@@ -52,6 +52,17 @@ diff -ru a/esphome/components/usb_hid/usb_hid.cpp b/esphome/components/usb_hid/u
 +  if (device->read_ok_.exchange(false, std::memory_order_relaxed))
 +    device->retries_ = 0;
 +  if (++device->retries_ > 5) {
++    // Behind a hub the root port is not this device's alone: a power cycle would also drop the hub
++    // and everything else on it (the other keyboards, a Bluetooth dongle with its connections). Stop
++    // reading this device only; replugging it starts it again (martijnbuts, 13-11-2026).
++    usb_device_info_t info{};
++    if (usb_host_device_info(device->dev_->handle, &info) == ESP_OK && info.parent.dev_hdl != nullptr) {
++      device->retries_ = 0;
++      ESP_LOGW(TAG, "%s: interface %u keeps failing (status %u); behind a hub, so the USB port is not reset. "
++                    "Stopped until it is plugged in again",
++               device->device_name_.c_str(), number, code);
++      return;
++    }
 +    // The device no longer answers at all (seen with a wired Xbox 360 pad: every read fails at
 +    // once, reading again never helps, unplugging fixes it). Do the unplugging in software: power
 +    // the root port off and on. This also drops every other device on the port (a hub and what is
@@ -87,7 +98,7 @@ diff -ru a/esphome/components/usb_hid/usb_hid.cpp b/esphome/components/usb_hid/u
  }
  
  void USBHIDClient::dump_config() {
-@@ -519,6 +591,13 @@
+@@ -543,6 +626,13 @@
    ESP_LOGI(TAG, "HID device ready: %s (%u interfaces)", this->device_name_.c_str(),
             static_cast<unsigned>(this->interfaces_.size()));
    this->ready_ = true;
@@ -101,7 +112,7 @@ diff -ru a/esphome/components/usb_hid/usb_hid.cpp b/esphome/components/usb_hid/u
    this->write_leds_(this->leds_);
    // What the device is (get_device_kinds()) is known from here on.
    this->client_->devices_cb_.call();
-@@ -537,12 +616,24 @@
+@@ -561,12 +651,24 @@
          if (generation != this->generation_.load(std::memory_order_acquire))
            return;
          if (!status.success) {
@@ -130,7 +141,7 @@ diff -ru a/esphome/components/usb_hid/usb_hid.cpp b/esphome/components/usb_hid/u
 diff -ru a/esphome/components/usb_hid/usb_hid.h b/esphome/components/usb_hid/usb_hid.h
 --- a/esphome/components/usb_hid/usb_hid.h
 +++ b/esphome/components/usb_hid/usb_hid.h
-@@ -92,6 +92,9 @@
+@@ -95,6 +95,9 @@
    std::atomic<uint32_t> generation_{0};
    size_t pad_index_{0};  // the interface the gamepad driver talks to
    bool ready_{false};
@@ -140,7 +151,7 @@ diff -ru a/esphome/components/usb_hid/usb_hid.h b/esphome/components/usb_hid/usb
  };
  
  // USB HID: any number of HID devices at once (a keyboard, the receiver of a wireless set, a headset's
-@@ -148,12 +151,26 @@
+@@ -153,12 +156,26 @@
    void write_leds_(uint8_t leds) override;
    USBHIDDevice *find_device_(uint32_t serial) const;
    void publish_name_();

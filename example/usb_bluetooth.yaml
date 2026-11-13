@@ -1,0 +1,33 @@
+# ─── USB Bluetooth dongle on an ESP32-P4 screen: detection only ────────────────────────────────
+# Use as a package next to usb_input.yaml:
+#   packages:
+#     usb: !include usb_input.yaml
+#     usb_bt: !include usb_bluetooth.yaml
+#
+# What this does: the fork's usb_bluetooth takes the dongle (any vendor, by its USB class), resets
+# the controller and logs its Bluetooth version, address and name. That shows that the dongle is
+# found, also behind a hub, and that it answers HCI commands. It does NOT make Bluetooth devices
+# usable yet: for that the fork's Bluetooth host components are needed (bluedroid: true with
+# bt_host, bt_hid, ...), which replace ESPHome's own esp32_ble and ble_client. See the README,
+# "USB Bluetooth dongles".
+#
+# STATUS: validated with `esphome config` on ESPHome 2026.12.0-dev (13 Nov 2026); NOT yet compiled
+# or run on the hardware.
+#
+# Behind a USB 2.0 hub: set full_speed_only: true in usb_host (most Bluetooth dongles are
+# full-speed devices; see usb_input.yaml).
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/p1ngb4ck/esphome
+      ref: 9fb894738eb7db8cc642f7e08aad1e957cbaea60
+    components: [usb_bluetooth]
+
+usb_bluetooth:
+  - id: usb_bt
+    # vid: 0x0A12   # optional: only this dongle (the log shows the ids when it is plugged in)
+    # pid: 0x0001
+    # Realtek dongles need their firmware, next to this file (linux-firmware, rtl_bt/):
+    # firmware: rtl8761bu_fw.bin
+    # firmware_config: rtl8761bu_config.bin
