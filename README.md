@@ -8,6 +8,25 @@ ESPHome 2026.11.0-dev (23 Oct 2026), ESP-IDF 6.1.0, LVGL 9.6, with the fork at c
 [`d050f83`](https://github.com/p1ngb4ck/esphome/commit/d050f83b1aec8890d504b9a9e79b8add460fc91a)
 (23 Oct 2026).
 
+> **Update 15 Nov 2026, branch `espressif-usb-1.6.1` (test):** `components/usb_host` is the
+> fork's `usb_host` from [`9fb8947`](https://github.com/p1ngb4ck/esphome/commit/9fb894738eb7db8cc642f7e08aad1e957cbaea60)
+> with its `espressif/usb` patches ported from 1.4.1 to **1.6.1** (hub disconnect and leak fixes,
+> see the [changelog](https://components.espressif.com/components/espressif/usb/versions/1.6.1/changelog)).
+> 1.6.0 made `fsls_only` native, so those patches are gone, but its HAL side
+> (`USB_DWC_HAL_INIT_HAS_CONFIG`) is only in ESP-IDF master: on IDF 5.5 and 6.1 1.6.x refuses
+> `fsls_only`, so the LL fallback (HCFG.FSLSSupp before each port reset) stays for those HALs.
+> Four anchors moved (`hcd_port_config_t`, the periodic-OUT FIFO split with 3 RX status lines,
+> the `hub_config` init, the enumeration failure switch) and the IDF minimum is now 5.5.3. Take
+> `usb_host` from here and `hid` / `usb_bluetooth` from the fork commit:
+>
+> ```yaml
+> external_components:
+>   - source: {type: git, url: https://github.com/p1ngb4ck/esphome, ref: 9fb894738eb7db8cc642f7e08aad1e957cbaea60}
+>     components: [hid, usb_bluetooth]
+>   - source: {type: git, url: https://github.com/martijnbuts/usb, ref: espressif-usb-1.6.1}
+>     components: [usb_host, lvgl_usb_hid, usb_hid]
+> ```
+>
 > **Update 13 Nov 2026 (not yet tested on the hardware):** the fork was reorganised. Its
 > `testing_dev` branch is gone; everything is now on [`dev`](https://github.com/p1ngb4ck/esphome/tree/dev),
 > built from one repository per topic ([esphome-usb-host](https://github.com/p1ngb4ck/esphome-usb-host),
