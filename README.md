@@ -8,7 +8,7 @@ ESPHome 2026.11.0-dev (23 Oct 2026), ESP-IDF 6.1.0, LVGL 9.6, with the fork at c
 [`d050f83`](https://github.com/p1ngb4ck/esphome/commit/d050f83b1aec8890d504b9a9e79b8add460fc91a)
 (23 Oct 2026).
 
-> **Update 15 Nov 2026, branch `espressif-usb-1.6.1` (test):** `components/usb_host` is the
+> **Update 15 Nov 2026, branch `espressif-usb-1.6.1` (compiled and running on the Waveshare 7B, ESP-IDF 6.1.0):** `components/usb_host` is the
 > fork's `usb_host` from [`9fb8947`](https://github.com/p1ngb4ck/esphome/commit/9fb894738eb7db8cc642f7e08aad1e957cbaea60)
 > with its `espressif/usb` patches ported from 1.4.1 to **1.6.1** (hub disconnect and leak fixes,
 > see the [changelog](https://components.espressif.com/components/espressif/usb/versions/1.6.1/changelog)).
@@ -16,7 +16,10 @@ ESPHome 2026.11.0-dev (23 Oct 2026), ESP-IDF 6.1.0, LVGL 9.6, with the fork at c
 > (`USB_DWC_HAL_INIT_HAS_CONFIG`) is only in ESP-IDF master: on IDF 5.5 and 6.1 1.6.x refuses
 > `fsls_only`, so the LL fallback (HCFG.FSLSSupp before each port reset) stays for those HALs.
 > Four anchors moved (`hcd_port_config_t`, the periodic-OUT FIFO split with 3 RX status lines,
-> the `hub_config` init, the enumeration failure switch) and the IDF minimum is now 5.5.3. Take
+> the `hub_config` init, the enumeration failure switch) and the IDF minimum is now 5.5.3.
+> On the hardware: pulling a USB Bluetooth dongle (Realtek 2357:0604) out and back in is handled
+> cleanly (endpoints stop, "controller removed", re-detected) where the 1.4.1 build rebooted the
+> P4, and a Microsoft receiver (045e:0745) enumerates with the mouse working. Take
 > `usb_host` from here and `hid` / `usb_bluetooth` from the fork commit:
 >
 > ```yaml
