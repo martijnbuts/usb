@@ -7,16 +7,15 @@
 # High-Speed). Several devices at the same time: a combo receiver (one dongle) or a USB hub (then
 # also full_speed_only, see below).
 #
-# usb_host and hid come from the p1ngb4ck fork (upstream ESPHome has no HID support yet), pinned
-# to a commit of its dev branch: 9fb8947 (3 Nov 2026). The fork's testing_dev branch, which the
-# earlier pins (d050f83 and older) were on, no longer exists. usb_hid comes from this repo: the
-# fork's copy of that commit with a fix for devices that stop after a read error (see the README,
-# Troubleshooting). lvgl_usb_hid (this repo) connects them to upstream ESPHome's lvgl.
-# One usb_hid entry serves every HID device that is plugged in.
+# hid comes from the p1ngb4ck fork (upstream ESPHome has no HID support yet), pinned to a commit
+# of its dev branch: 9fb8947 (3 Nov 2026). usb_host comes from this repo: the fork's usb_host of
+# that commit with espressif/usb 1.6.1 instead of 1.4.1 (unplugging no longer reboots the P4).
+# usb_hid comes from this repo too: the fork's copy of that commit with a fix for devices that stop
+# after a read error (see the README, Troubleshooting). lvgl_usb_hid (this repo) connects them to
+# upstream ESPHome's lvgl. One usb_hid entry serves every HID device that is plugged in.
 #
-# STATUS of this pin: validated with `esphome config` and code generation on ESPHome 2026.12.0-dev
-# (13 Nov 2026); NOT yet compiled or run on the hardware. The last combination that ran on the
-# Waveshare 7B is d050f83 (see the README).
+# STATUS: compiled and running on the Waveshare 7B, ESPHome 2026.12.0-dev with ESP-IDF 6.1.1
+# (21 Nov 2026).
 #
 # Keyboard shortcuts for automations go in usb_hid with on_key, for example:
 #   on_key:
@@ -28,11 +27,17 @@ external_components:
       type: git
       url: https://github.com/p1ngb4ck/esphome
       ref: 9fb894738eb7db8cc642f7e08aad1e957cbaea60
-    components: [usb_host, hid]
+    components: [hid]
   - source:
       type: git
       url: https://github.com/martijnbuts/usb
-    components: [lvgl_usb_hid, usb_hid]
+    components: [usb_host, lvgl_usb_hid, usb_hid]
+
+# The fork's usb_host uses LOOP_TASK_CORE, a constant only the fork's esp32 core defines.
+# Upstream ESPHome pins the loop task to core 1 as well.
+esphome:
+  build_flags:
+    - -DLOOP_TASK_CORE=1
 
 usb_host:
   # A hub may sit in between (keyboard, mouse, pad and a Bluetooth dongle all in one port)

@@ -1,4 +1,4 @@
-# ─── USB Bluetooth dongle on an ESP32-P4 screen: detection only ────────────────────────────────
+# ─── USB Bluetooth dongle on an ESP32-P4 screen: detection and firmware ────────────────────────
 # Use as a package next to usb_input.yaml:
 #   packages:
 #     usb: !include usb_input.yaml
@@ -11,11 +11,13 @@
 # bt_host, bt_hid, ...), which replace ESPHome's own esp32_ble and ble_client. See the README,
 # "USB Bluetooth dongles".
 #
-# STATUS: validated with `esphome config` on ESPHome 2026.12.0-dev (13 Nov 2026); NOT yet compiled
-# or run on the hardware.
+# STATUS: running on the Waveshare 7B (ESP-IDF 6.1.1, 21 Nov 2026) with a TP-Link UB500
+# (2357:0604, RTL8761BU) behind a hub: detected, firmware loaded, unplug and replug handled.
 #
-# Behind a USB 2.0 hub: set full_speed_only: true in usb_host (most Bluetooth dongles are
-# full-speed devices; see usb_input.yaml).
+# usb_host needs two settings (in usb_input.yaml or here):
+# - full_speed_only: true behind a USB 2.0 hub (most Bluetooth dongles are full-speed devices).
+# - max_transfer_requests: 32. With the default 16 the slots run out while a Realtek dongle gets
+#   its firmware ("All 16 transfer slots in use", HCI 0xFC20 without an answer).
 
 external_components:
   - source:
@@ -24,10 +26,14 @@ external_components:
       ref: 9fb894738eb7db8cc642f7e08aad1e957cbaea60
     components: [usb_bluetooth]
 
+usb_host:
+  max_transfer_requests: 32
+
 usb_bluetooth:
   - id: usb_bt
     # vid: 0x0A12   # optional: only this dongle (the log shows the ids when it is plugged in)
     # pid: 0x0001
-    # Realtek dongles need their firmware, next to this file (linux-firmware, rtl_bt/):
-    # firmware: rtl8761bu_fw.bin
-    # firmware_config: rtl8761bu_config.bin
+    # Realtek dongles need their firmware (linux-firmware, rtl_bt/ on kernel.org). The path is
+    # relative to the device's YAML; the files are checked when the config is validated.
+    firmware: firmware/rtl8761bu_fw.bin
+    firmware_config: firmware/rtl8761bu_config.bin

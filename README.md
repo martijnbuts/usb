@@ -4,9 +4,24 @@ A USB mouse and keyboard as input for an ESPHome LVGL screen on the ESP32-P4, on
 ESPHome-dev** with ESP-IDF 6.1.
 
 Tested on the **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B** (Type-A USB 2.0 OTG High-Speed port),
-ESPHome 2026.11.0-dev (23 Oct 2026), ESP-IDF 6.1.0, LVGL 9.6, with the fork at commit
-[`d050f83`](https://github.com/p1ngb4ck/esphome/commit/d050f83b1aec8890d504b9a9e79b8add460fc91a)
-(23 Oct 2026).
+ESPHome 2026.12.0-dev (21 Nov 2026), ESP-IDF 6.1.1 (ESPHome's default since
+[esphome#22902](https://github.com/esphome/esphome/pull/22902)), LVGL 9.6, with the fork at commit
+[`9fb8947`](https://github.com/p1ngb4ck/esphome/commit/9fb894738eb7db8cc642f7e08aad1e957cbaea60)
+(3 Nov 2026) and `usb_host` from this repo (espressif/usb 1.6.1).
+
+> **Update 21 Nov 2026 (running on the Waveshare 7B, ESP-IDF 6.1.1):** `main` now has everything
+> below: `usb_host` from this repo with espressif/usb **1.6.1**, `usb_hid`, `lvgl_usb_hid`, and
+> `usb_bluetooth` from the fork.
+> - **Unplugging no longer reboots the P4.** With espressif/usb 1.4.1 pulling a USB device out
+>   could reboot it; 1.6.1 fixes the asserts behind that. The same bump for upstream ESPHome's own
+>   `usb_host`: [esphome#23018](https://github.com/esphome/esphome/pull/23018).
+> - **Realtek Bluetooth dongles get their firmware.** A TP-Link UB500 (2357:0604, RTL8761BU) loads
+>   `rtl8761bu_fw.bin` + `rtl8761bu_config.bin` at every plug-in ("Firmware loaded: revision
+>   0xDFC6, LMP subversion 0xD922"). This needs **`max_transfer_requests: 32`** in `usb_host`: with
+>   the default 16 the slots ran out during the download ("All 16 transfer slots in use", HCI
+>   0xFC20 without an answer). See [`example/usb_bluetooth.yaml`](example/usb_bluetooth.yaml).
+> - The dongle is ready but not used yet: Bluetooth Classic on it waits for upstream (esphome#21408,
+>   esphome#22979); Bluetooth LE comes from the C6 already.
 
 > **Update 15 Nov 2026, branch `espressif-usb-1.6.1` (compiled and running on the Waveshare 7B, ESP-IDF 6.1.0):** `components/usb_host` is the
 > fork's `usb_host` from [`9fb8947`](https://github.com/p1ngb4ck/esphome/commit/9fb894738eb7db8cc642f7e08aad1e957cbaea60)
@@ -629,8 +644,8 @@ The ESP32-P4 has no radio. On the Waveshare 7B the ESP32-C6 gives it WiFi and Bl
 Bluetooth dongle can add it, through the fork's `usb_bluetooth`. Upstream ESPHome-dev has no such
 component (checked 13 Nov 2026).
 
-**Status: read from the fork's code and validated with `esphome config`; nothing of this has been
-compiled or run on the hardware yet.**
+**Status (21 Nov 2026): level 1 runs on the Waveshare 7B** with a TP-Link UB500 (RTL8761BU) behind a
+hub: detected, firmware loaded, unplug and replug handled. Levels 2 and 3 are not tried.
 
 ### Three levels
 
